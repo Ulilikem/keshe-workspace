@@ -1,0 +1,12 @@
+# 本地数据与配置
+.workbuddy/
+*.genie
+
+# 验收截图与临时文件
+shot_*.png
+smoke_scores.png
+b1_material.png
+
+# 系统文件
+.DS_Store
+Thumbs.db
