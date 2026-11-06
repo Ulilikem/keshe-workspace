@@ -592,47 +592,110 @@ main {
 .auth-wb { justify-content: center; width: 100%; }
 
 /* ===== 我的页面 ===== */
-.profile-panel {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 18px;
+.profile-wrap {
   max-width: 760px;
-}
-.profile-card, .profile-danger-card, .profile-login-card {
-  padding: 26px;
-}
-.profile-card .auth-form { max-width: 360px; }
-.profile-hero {
   display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+/* 顶部身份卡：居中头像 */
+.profile-hero-card {
+  padding: 34px 28px 30px;
+  display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 16px;
-  margin-bottom: 20px;
-  padding-bottom: 20px;
-  border-bottom: 1px solid #eef0f2;
+  text-align: center;
+}
+.profile-avatar-ring {
+  position: relative;
+  width: 104px; height: 104px;
+  padding: 4px;
+  border-radius: 50%;
+  background: conic-gradient(from 180deg, #6cb8ff, #0068df, #6ee7c8, #6cb8ff);
+  box-shadow: 0 10px 30px #0068df26;
+  margin-bottom: 16px;
 }
 .profile-avatar {
-  width: 72px; height: 72px;
+  width: 100%; height: 100%;
   border-radius: 50%;
-  background: linear-gradient(135deg, #e8f1f8, #dde9f2);
-  border: 2px solid #ffffff;
+  background: linear-gradient(135deg, #ffffff, #eef4fb);
   color: #40565f;
   display: flex; align-items: center; justify-content: center;
-  font-size: 28px; font-weight: 700;
-  box-shadow: 0 6px 18px #1b3a4020;
+  font-size: 40px; font-weight: 700;
   flex-shrink: 0;
   overflow: hidden;
   cursor: pointer;
 }
-.profile-meta { display: flex; flex-direction: column; gap: 4px; }
-.profile-meta strong { font-size: 18px; color: #2f363a; }
-.profile-phone { font-size: 13px; color: #7a858d; }
+.profile-display-name {
+  font-size: 22px;
+  color: #25282c;
+  font-weight: 650;
+  margin-bottom: 4px;
+}
+.profile-phone { font-size: 13px; color: #7a858d; margin-bottom: 10px; }
+.profile-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #0a7a5a;
+  background: #e7f6ef;
+  border: 1px solid #c8ead9;
+  padding: 4px 12px;
+  border-radius: 999px;
+}
+
+/* 分组卡片 */
+.profile-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 18px;
+  align-items: start;
+}
+.profile-card { padding: 24px; }
+.profile-card .card-heading { margin-bottom: 16px; }
+.profile-setting { margin-bottom: 14px; }
+.profile-setting .field-label { display: block; margin-bottom: 6px; }
+.profile-setting input {
+  width: 100%;
+  border: 1px solid #dfe4e9;
+  background: #fff;
+  border-radius: 12px;
+  padding: 11px 13px;
+  font-size: 13px;
+  color: #454c54;
+}
+.profile-setting input:focus { border-color: #79b1e8; box-shadow: 0 0 0 3px #007aff0d; outline: none; }
 .profile-avatar-actions { display: flex; gap: 8px; }
 .profile-avatar-actions .button { flex: 1; justify-content: center; }
-.profile-danger-card h3 { margin: 0 0 6px; font-size: 15px; color: #2f363a; }
-.profile-danger-card p { margin: 0 0 16px; font-size: 12px; color: #888b91; line-height: 1.6; }
-.profile-danger-card .button { width: 100%; justify-content: center; }
+.profile-save-btn { justify-content: center; width: 100%; margin-top: 4px; }
+
+/* 账号信息列表 */
+.profile-info-list {
+  display: flex;
+  flex-direction: column;
+}
+.profile-info-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 0;
+  border-bottom: 1px solid #f0f1f3;
+  font-size: 13px;
+}
+.profile-info-row:last-child { border-bottom: 0; }
+.info-label { color: #888b91; }
+.info-value { color: #3a434b; font-weight: 500; }
+
+/* 账号操作 */
+.profile-danger-card { grid-column: 1 / -1; }
+.profile-danger-card .card-heading { margin-bottom: 16px; }
+.profile-logout-btn { justify-content: center; width: 100%; }
 
 /* 未登录引导卡 */
+.profile-login-card { padding: 26px; max-width: 760px; }
 .profile-login-body {
   display: flex;
   align-items: center;
@@ -645,7 +708,8 @@ main {
 .profile-login-body .button { margin-left: auto; flex-shrink: 0; }
 
 @media (max-width: 760px) {
-  .profile-panel { grid-template-columns: 1fr; }
+  .profile-grid { grid-template-columns: 1fr; }
+  .profile-danger-card { grid-column: auto; }
 }
 
 /* ===== 子标签 ===== */

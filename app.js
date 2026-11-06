@@ -358,6 +358,25 @@ function renderProfile() {
   const contact = info.phone ? maskPhone(info.phone) : (info.email ? maskEmail(info.email) : "未绑定手机/邮箱");
   document.getElementById("profile-phone").textContent = contact;
 
+  // 登录方式与账号
+  let method = "—", account = "—";
+  if (info.phone) { method = "手机号"; account = maskPhone(info.phone); }
+  else if (info.email) { method = "邮箱"; account = maskEmail(info.email); }
+  else if (info.name) { method = "WorkBuddy"; account = info.name; }
+  document.getElementById("profile-login-method").textContent = method;
+  document.getElementById("profile-account").textContent = account;
+
+  // 负责人徽章
+  const roleBadge = document.getElementById("profile-role-badge");
+  const roleText = document.getElementById("profile-role");
+  if (isAdminUser) {
+    roleBadge.hidden = false;
+    roleText.textContent = "负责人";
+  } else {
+    roleBadge.hidden = true;
+    roleText.textContent = "普通成员";
+  }
+
   // 头像
   const av = document.getElementById("profile-avatar");
   if (avatarUrl) {
