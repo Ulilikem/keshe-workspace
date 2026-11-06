@@ -509,8 +509,10 @@ async function bootstrap() {
     // 预加载模板
     loadTemplates();
     loadTemplateOptions();
-    // 预加载活动指标 + 检测到点提醒
+    // 预加载概览页三个指标 + 检测到点提醒
     updateReminderMetric();
+    updateTemplateMetric();
+    updateActiveMemberMetricFromDb();
     checkDueReminders();
     // 处理 OAuth 回调
     const url = new URL(location.href);
@@ -1792,6 +1794,32 @@ function updateReminderMetric() {
     const now = new Date();
     const upcoming = (data || []).filter((a) => a.remind_at && new Date(a.remind_at) >= now).length;
     el.textContent = upcoming;
+  }).catch(() => {});
+}
+
+// 概览页「公文模板」指标（主题数量）
+function updateTemplateMetric() {
+  const el = document.getElementById("metric-templates");
+  if (!el || !cloud) return;
+  cloud.database.from("template_groups").select("id").then(({ data, error }) => {
+    if (error) return;
+    el.textContent = (data || []).length;
+  }).catch(() => {});
+}
+
+// 概览页「活跃成员」指标（本月有过加减分记录的成员数）
+function updateActiveMemberMetricFromDb() {
+  const el = document.getElementById("metric-members");
+  if (!el || !cloud) return;
+  cloud.database.from("scores").select("member, created_at").then(({ data }) => {
+    const now = new Date();
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const activeSet = new Set();
+    (data || []).forEach((s) => {
+      const d = new Date(s.created_at);
+      if (d >= monthStart) activeSet.add(s.member);
+    });
+    el.textContent = activeSet.size;
   }).catch(() => {});
 }
 
