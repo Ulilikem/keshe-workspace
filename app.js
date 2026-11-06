@@ -551,52 +551,98 @@ document.querySelectorAll(".sub-tab").forEach((tab) => {
   });
 });
 
-// 模板弹窗
+// 模板弹窗（新建主题 / 添加范文）
 const templateDialog = document.getElementById("template-dialog");
-let editingTemplateId = null;
+let editingGroupId = null; // 非 null = 添加范文模式；null = 新建主题模式
 
-document.getElementById("btn-add-template").addEventListener("click", () => {
-  editingTemplateId = null;
-  document.getElementById("template-dialog-title").textContent = "上传模板/格式";
-  document.getElementById("template-name").value = "";
-  document.getElementById("template-content").value = "";
-  document.getElementById("template-category").value = "notice";
+function openTemplateDialog(group) {
+  editingGroupId = group ? group.id : null;
+  const titleEl = document.getElementById("template-dialog-title");
+  const nameField = document.getElementById("template-name");
+  const categoryField = document.getElementById("template-category");
+  const contentEl = document.getElementById("template-content");
+  const contentLabel = document.getElementById("template-content-label");
+  const groupFields = document.getElementById("template-group-fields");
+  const groupHint = document.getElementById("template-group-hint");
+  const groupHintBox = document.getElementById("template-group-hint-box");
+
   document.getElementById("template-error").textContent = "";
+
+  if (group) {
+    // 添加范文模式
+    titleEl.textContent = "添加范文";
+    nameField.value = "";
+    categoryField.value = "notice";
+    contentEl.value = "";
+    contentLabel.textContent = "范文内容";
+    groupFields.hidden = true;
+    groupHint.hidden = false;
+    groupHintBox.textContent = `${group.title}（${CATEGORY_LABELS[group.category] || "其他"}）`;
+  } else {
+    // 新建主题模式
+    titleEl.textContent = "新建主题";
+    nameField.value = "";
+    categoryField.value = "notice";
+    contentEl.value = "";
+    contentLabel.textContent = "第一份范文内容";
+    groupFields.hidden = false;
+    groupHint.hidden = true;
+    groupHintBox.textContent = "";
+  }
   templateDialog.showModal();
-});
+}
+
+document.getElementById("btn-add-template").addEventListener("click", () => openTemplateDialog(null));
 document.getElementById("template-close").addEventListener("click", () => templateDialog.close());
 
 document.getElementById("template-save").addEventListener("click", async () => {
   if (!cloud) { showTemplateError("服务未连接"); return; }
   const session = await cloud.auth.getSession();
   if (session.error || !session.data) {
-    showTemplateError("请先登录后再上传模板");
+    showTemplateError("请先登录后再操作");
     return;
   }
-  const name = document.getElementById("template-name").value.trim();
-  const category = document.getElementById("template-category").value;
   const content = document.getElementById("template-content").value.trim();
   showTemplateError("");
+  if (!content) { showTemplateError("请填写范文内容"); return; }
 
-  if (!name) { showTemplateError("请填写模板名称"); return; }
-  if (!content) { showTemplateError("请填写模板/格式内容"); return; }
+  const ownerName = session.data.user?.name ?? null;
 
-  const payload = {
-    title: name,
-    category,
-    content,
-    owner_name: session.data.user?.name ?? null,
-  };
-
-  if (editingTemplateId) {
-    const { error } = await cloud.database
-      .from("templates")
-      .update(payload)
-      .eq("id", editingTemplateId);
+  if (editingGroupId) {
+    // 添加范文到已有主题
+    const { error } = await cloud.database.from("templates").insert({
+      group_id: editingGroupId,
+      content,
+      owner_name: ownerName,
+      // title/category 冗余存储便于兼容，但以 group 为准
+      title: "",
+      category: "",
+    });
     if (error) { showTemplateError("保存失败：" + (error.message || "")); return; }
   } else {
-    const { error } = await cloud.database.from("templates").insert(payload);
-    if (error) { showTemplateError("保存失败：" + (error.message || "")); return; }
+    // 新建主题 + 第一份范文
+    const name = document.getElementById("template-name").value.trim();
+    const category = document.getElementById("template-category").value;
+    if (!name) { showTemplateError("请填写主题名称"); return; }
+
+    // 1. 建主题
+    const { data: groupData, error: groupErr } = await cloud.database
+      .from("template_groups")
+      .insert({ title: name, category, owner_name: ownerName })
+      .select();
+    if (groupErr) { showTemplateError("创建主题失败：" + (groupErr.message || "")); return; }
+    const groupId = groupData?.[0]?.id;
+    if (!groupId) { showTemplateError("创建主题失败：未返回主题ID"); return; }
+
+    // 2. 插入第一份范文
+    const { error } = await cloud.database.from("templates").insert({
+      group_id: groupId,
+      content,
+      owner_name: ownerName,
+      title: "",
+      category: "",
+    });
+    if (error) { showTemplateError("保存范文失败：" + (error.message || "")); return; }
   }
   templateDialog.close();
   await loadTemplates();
@@ -606,55 +652,84 @@ function showTemplateError(msg) {
   document.getElementById("template-error").textContent = msg || "";
 }
 
-// 加载模板列表
+// 加载主题列表（含各主题的范文）
 async function loadTemplates() {
   if (!cloud) return;
   const listEl = document.getElementById("template-list");
   const emptyEl = document.getElementById("template-empty");
 
-  const { data, error } = await cloud.database
-    .from("templates")
+  const { data: groups, error } = await cloud.database
+    .from("template_groups")
     .select("*")
     .order("created_at", { ascending: false });
 
-  if (error) {
+  if (error || !groups || groups.length === 0) {
     listEl.innerHTML = "";
     emptyEl.hidden = false;
     return;
   }
 
-  if (!data || data.length === 0) {
-    listEl.innerHTML = "";
-    emptyEl.hidden = false;
-    return;
+  // 拉取所有范文，按 group 分组
+  const { data: tpls, error: tplErr } = await cloud.database
+    .from("templates")
+    .select("id, group_id, content, created_at")
+    .order("created_at", { ascending: true });
+
+  const byGroup = {};
+  if (!tplErr && tpls) {
+    tpls.forEach((t) => {
+      if (t.group_id == null) return;
+      (byGroup[t.group_id] = byGroup[t.group_id] || []).push(t);
+    });
   }
 
   emptyEl.hidden = true;
-  listEl.innerHTML = data
-    .map((t) => {
-      const cat = CATEGORY_LABELS[t.category] || t.category || "其他";
-      const catClass = t.category === "post" ? "post" : t.category === "format" ? "format" : "";
+  listEl.innerHTML = groups
+    .map((g) => {
+      const cat = CATEGORY_LABELS[g.category] || g.category || "其他";
+      const catClass = g.category === "post" ? "post" : g.category === "format" ? "format" : "";
+      const items = byGroup[g.id] || [];
+      const count = items.length;
+      const itemsHtml = items
+        .map((t, i) => `
+          <div class="template-item" data-id="${t.id}">
+            <div class="template-item-head">
+              <span class="template-item-no">范文 ${i + 1}</span>
+              <button class="template-del" data-id="${t.id}" data-gid="${g.id}">删除</button>
+            </div>
+            <pre>${escapeHtml(t.content)}</pre>
+          </div>`)
+        .join("");
       return `
-        <div class="card template-card" data-id="${t.id}">
-          <div class="template-card-top">
-            <span class="template-cat ${catClass}">${cat}</span>
-            <span class="template-card-foot" style="border:0;padding:0;gap:6px;">
-              <small>${t.owner_name || ""}</small>
-            </span>
+        <div class="card template-group-card" data-id="${g.id}">
+          <div class="template-group-head">
+            <div class="template-group-title">
+              <span class="template-cat ${catClass}">${cat}</span>
+              <h3>${escapeHtml(g.title)}</h3>
+              <span class="template-count">${count} 份范文</span>
+            </div>
+            <div class="template-group-actions">
+              <button class="template-add-item" data-id="${g.id}">＋ 添加范文</button>
+              <button class="template-del-group" data-id="${g.id}">删除主题</button>
+            </div>
           </div>
-          <h3>${escapeHtml(t.title)}</h3>
-          <pre>${escapeHtml(t.content)}</pre>
-          <div class="template-card-foot">
-            <small>${formatDate(t.created_at)}</small>
-            <button class="template-del" data-id="${t.id}">删除</button>
-          </div>
+          <div class="template-items">${itemsHtml || '<div class="template-item-empty">该主题下还没有范文</div>'}</div>
         </div>`;
     })
     .join("");
 
+  // 添加范文
+  listEl.querySelectorAll(".template-add-item").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const g = groups.find((x) => String(x.id) === String(btn.dataset.id));
+      openTemplateDialog(g);
+    });
+  });
+
+  // 删除范文
   listEl.querySelectorAll(".template-del").forEach((btn) => {
     btn.addEventListener("click", async () => {
-      if (!confirm("确定删除这个模板吗？")) return;
+      if (!confirm("确定删除这份范文吗？")) return;
       const { error } = await cloud.database
         .from("templates")
         .delete()
@@ -662,26 +737,41 @@ async function loadTemplates() {
       if (!error) await loadTemplates();
     });
   });
+
+  // 删除主题（级联删除其下范文）
+  listEl.querySelectorAll(".template-del-group").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      if (!confirm("确定删除整个主题吗？其下的所有范文也会一并删除。")) return;
+      const gid = btn.dataset.id;
+      // 先删范文，再删主题
+      await cloud.database.from("templates").delete().eq("group_id", gid);
+      const { error } = await cloud.database
+        .from("template_groups")
+        .delete()
+        .eq("id", gid);
+      if (!error) await loadTemplates();
+    });
+  });
 }
 
-// 加载生成页的模板下拉选项
+// 加载生成页的主题下拉选项
 async function loadTemplateOptions() {
   if (!cloud) return;
   const select = document.getElementById("gen-template-select");
   const { data, error } = await cloud.database
-    .from("templates")
-    .select("id, title, category, content")
+    .from("template_groups")
+    .select("id, title, category")
     .order("created_at", { ascending: false });
 
   if (error || !data) {
-    select.innerHTML = '<option value="">不使用模板（用通用格式）</option>';
+    select.innerHTML = '<option value="">不使用主题（用通用格式）</option>';
     return;
   }
 
   const options = data
-    .map((t) => `<option value="${t.id}">${escapeHtml(t.title)}（${CATEGORY_LABELS[t.category] || "其他"}）</option>`)
+    .map((g) => `<option value="${g.id}">${escapeHtml(g.title)}（${CATEGORY_LABELS[g.category] || "其他"}）</option>`)
     .join("");
-  select.innerHTML = '<option value="">不使用模板（用通用格式）</option>' + options;
+  select.innerHTML = '<option value="">不使用主题（用通用格式）</option>' + options;
 }
 
 // 生成类型切换
@@ -795,16 +885,27 @@ document.getElementById("btn-generate").addEventListener("click", async () => {
   showGenError("");
   if (!material) { showGenError("请先填写资料内容"); return; }
 
-  // 获取选中的模板
-  const templateId = document.getElementById("gen-template-select").value;
+  // 获取选中的主题及其下所有范文
+  const groupId = document.getElementById("gen-template-select").value;
   let templateContent = "";
-  if (templateId) {
-    const { data } = await cloud.database
-      .from("templates")
-      .select("content, title")
-      .eq("id", templateId)
+  if (groupId) {
+    const { data: groupData } = await cloud.database
+      .from("template_groups")
+      .select("title")
+      .eq("id", groupId)
       .maybeSingle();
-    templateContent = data ? `${data.title}：\n${data.content}` : "";
+    const { data: tpls } = await cloud.database
+      .from("templates")
+      .select("content")
+      .eq("group_id", groupId)
+      .order("created_at", { ascending: true });
+
+    const title = groupData?.title || "参考主题";
+    const contents = (tpls || []).map((t) => t.content).filter(Boolean);
+    if (contents.length > 0) {
+      templateContent = `主题「${title}」下共有 ${contents.length} 份范文，请综合参考它们的格式与措辞风格：\n\n` +
+        contents.map((c, i) => `【范文 ${i + 1}】\n${c}`).join("\n\n");
+    }
   }
 
   // 显示加载态
@@ -891,7 +992,7 @@ function buildUserPrompt(type, material, templateContent, imageCount) {
   const typeName = type === "notice" ? "通知" : "推文";
   let prompt = `请根据以下资料，撰写一篇${typeName}。\n\n`;
   if (templateContent) {
-    prompt += `【需要遵循的模板/格式要求】\n${templateContent}\n\n`;
+    prompt += `【参考范文】\n${templateContent}\n\n`;
   } else {
     prompt += "【格式要求】\n请使用标准公文体格式，标题、称谓、正文、落款完整。\n\n";
   }
@@ -902,7 +1003,7 @@ function buildUserPrompt(type, material, templateContent, imageCount) {
       prompt += "【配图标注要求】\n由于这是推文，请在成品的合适位置用「【配图N：说明】」标注对应图片（N 为图片序号，说明为该图内容的一两句话概括），让读者知道哪里该插入第 N 张图。\n\n";
     }
   }
-  prompt += "要求：\n1. 严格遵循上述模板/格式\n2. 信息来自资料和图片，不要编造\n3. 资料或图片中缺失的关键信息（如具体日期、部门名称）用【】标注占位\n4. 直接输出成品，不要解释说明";
+  prompt += "要求：\n1. 综合参考上述范文的格式与措辞风格（范文越多越能贴近你的习惯，但以本次资料为准）\n2. 信息来自资料和图片，不要编造\n3. 资料或图片中缺失的关键信息（如具体日期、部门名称）用【】标注占位\n4. 直接输出成品，不要解释说明";
   return prompt;
 }
 
