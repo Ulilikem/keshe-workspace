@@ -83,6 +83,9 @@ document.getElementById("toggle-sidebar").addEventListener("click", () => {
     document.body.classList.toggle("sidebar-collapsed");
   }
 });
+document.getElementById("sidebar-backdrop").addEventListener("click", () => {
+  document.body.classList.remove("sidebar-open");
+});
 
 // ===== 导航绑定 =====
 document.querySelectorAll(".nav-item[data-view], .button[data-view], .visual-card[data-view]").forEach((el) => {
@@ -1254,13 +1257,16 @@ async function loadMemberList() {
   document.getElementById("btn-add-member").hidden = false;
   const { data } = await cloud.database.from("member_meta").select("name, role, status, uid").order("name");
   if (!data || data.length === 0) {
-    listEl.innerHTML = '<div class="empty-state"><p>暂无成员，点击右上角「添加成员」。</p></div>';
+    listEl.innerHTML = '<div class="empty-state"><p>暂无成员，点击「添加成员」。</p></div>';
     return;
   }
   listEl.innerHTML = data
     .map((m) => {
       const disabled = m.status === "disabled";
       const bound = !!m.uid;
+      const check = isAdminUser
+        ? `<input type="checkbox" class="member-check" data-name="${escapeHtml(m.name)}" aria-label="选择${escapeHtml(m.name)}" />`
+        : "";
       const actions = isAdminUser
         ? `<div class="member-item-actions">
           <button data-act="edit" data-name="${escapeHtml(m.name)}">编辑</button>
@@ -1269,6 +1275,7 @@ async function loadMemberList() {
         : "";
       return `
       <div class="member-item ${disabled ? "disabled" : ""}">
+        ${check}
         <span class="member-item-name">${escapeHtml(m.name)}</span>
         <span class="member-item-role">${escapeHtml(m.role || "")}</span>
         ${bound ? '<span class="member-item-bound" title="该成员已绑定登录账号">已绑定</span>' : ""}
@@ -1297,6 +1304,28 @@ async function loadMemberList() {
 // 添加/编辑成员
 const memberDialog = document.getElementById("member-dialog");
 let editingMemberName = null;
+
+document.getElementById("btn-clear-members").addEventListener("click", async () => {
+  if (!cloud) return;
+  if (!isAdminUser) { showPermissionToast("你没有权限删除成员，仅负责人可以操作。"); return; }
+  const names = [...document.querySelectorAll("#member-list .member-check:checked")]
+    .map((el) => el.dataset.name)
+    .filter(Boolean);
+  if (names.length === 0) { showPermissionToast("请先勾选要删除的成员。"); return; }
+  const confirmed = confirm(`确定删除选中的 ${names.length} 位成员吗？\n\n${names.join("、")}\n\n将同时删除这些成员的加减分记录，且不可恢复。`);
+  if (!confirmed) return;
+  for (const name of names) {
+    const scoreRes = await cloud.database.from("scores").delete().eq("member", name);
+    if (scoreRes.error) { alert("清空加减分记录失败：" + (scoreRes.error.message || name)); return; }
+    const memberRes = await cloud.database.from("members").delete().eq("name", name);
+    if (memberRes.error) { alert("删除成员失败：" + (memberRes.error.message || name)); return; }
+    const metaRes = await cloud.database.from("member_meta").delete().eq("name", name);
+    if (metaRes.error) { alert("删除成员资料失败：" + (metaRes.error.message || name)); return; }
+  }
+  showPermissionToast(`已删除 ${names.length} 位成员。`);
+  await loadMemberList();
+  await loadMemberOptions();
+});
 
 document.getElementById("btn-add-member").addEventListener("click", () => {
   if (!isAdminUser) { showPermissionToast("你没有权限添加成员，仅负责人可以操作。"); return; }
