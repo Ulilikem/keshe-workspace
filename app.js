@@ -234,8 +234,6 @@ async function refreshUser() {
   const { data: session, error } = await cloud.auth.getSession();
   const nameEl = document.getElementById("user-name");
   const avatarEls = [document.getElementById("user-avatar"), document.getElementById("top-avatar")];
-  const wsName = document.getElementById("ws-name");
-  const wsAvatar = document.getElementById("ws-avatar");
 
   if (error || !session) {
     nameEl.textContent = "未登录";
@@ -259,9 +257,27 @@ async function refreshUser() {
   const initial = (name || "用").charAt(0);
   nameEl.textContent = name;
   avatarEls.forEach((a) => (a.textContent = initial));
-  if (wsName) wsName.textContent = name;
-  if (wsAvatar) wsAvatar.textContent = initial;
   document.getElementById("env-pill").textContent = "已登录";
+
+  // 登录后自动认领负责人身份：若自己的手机号在 admins 表但尚未绑定 uid，则补上（用于数据库 RLS 判定管理员）
+  claimAdminIfNeeded();
+}
+
+async function claimAdminIfNeeded() {
+  if (!cloud) return;
+  try {
+    const u = await cloud.auth.getUser();
+    const phone = u.data?.phone ? normalizePhone(u.data.phone) : "";
+    if (!phone) return;
+    const { data } = await cloud.database.from("admins").select("id, uid").eq("phone", phone);
+    const rec = data && data[0];
+    if (rec && !rec.uid) {
+      // 该手机号已设为负责人但还没绑定 uid，补上
+      await cloud.database.rpc("claim_admin", { phone_input: phone });
+    }
+  } catch (e) {
+    // 忽略认领失败，不影响正常使用
+  }
 }
 
 // ===== 启动 =====
@@ -792,6 +808,9 @@ async function loadMemberOptions() {
 async function loadMemberList() {
   if (!cloud) return;
   const listEl = document.getElementById("member-list");
+  // 权限：仅管理员可增删改成员
+  await checkScorePermission();
+  document.getElementById("btn-add-member").hidden = !isAdminUser;
   const { data } = await cloud.database.from("member_meta").select("name, role, status").order("name");
   if (!data || data.length === 0) {
     listEl.innerHTML = '<div class="empty-state"><p>暂无成员，点击右上角「添加成员」。</p></div>';
@@ -800,20 +819,24 @@ async function loadMemberList() {
   listEl.innerHTML = data
     .map((m) => {
       const disabled = m.status === "disabled";
+      const actions = isAdminUser
+        ? `<div class="member-item-actions">
+          <button data-act="edit" data-name="${escapeHtml(m.name)}">编辑</button>
+          <button data-act="toggle" data-name="${escapeHtml(m.name)}">${disabled ? "启用" : "停用"}</button>
+        </div>`
+        : "";
       return `
       <div class="member-item ${disabled ? "disabled" : ""}">
         <span class="member-item-name">${escapeHtml(m.name)}</span>
         <span class="member-item-role">${escapeHtml(m.role || "")}</span>
         ${disabled ? '<span class="member-item-status">已停用</span>' : ""}
-        <div class="member-item-actions">
-          <button data-act="edit" data-name="${escapeHtml(m.name)}">编辑</button>
-          <button data-act="toggle" data-name="${escapeHtml(m.name)}">${disabled ? "启用" : "停用"}</button>
-        </div>
+        ${actions}
       </div>`;
     })
     .join("");
   listEl.querySelectorAll("[data-act]").forEach((btn) => {
     btn.addEventListener("click", async () => {
+      if (!isAdminUser) return;
       const name = btn.dataset.name;
       if (btn.dataset.act === "edit") {
         openMemberDialog(name);
@@ -888,21 +911,31 @@ document.getElementById("member-save").addEventListener("click", async () => {
 async function loadAdminList() {
   if (!cloud) return;
   const listEl = document.getElementById("admin-list");
+  // 权限：仅管理员可管理负责人
+  await checkScorePermission();
+  const adminAddRow = document.getElementById("admin-add-row");
+  if (adminAddRow) adminAddRow.hidden = !isAdminUser;
   const { data } = await cloud.database.from("admins").select("phone, name").order("created_at");
   if (!data || data.length === 0) {
     listEl.innerHTML = '<p class="card-heading-p">暂无负责人账号。</p>';
     return;
   }
   listEl.innerHTML = data
-    .map((a) => `
+    .map((a) => {
+      const delBtn = isAdminUser
+        ? `<button data-phone="${escapeHtml(a.phone)}">取消负责人</button>`
+        : "";
+      return `
       <div class="admin-item">
         <span class="admin-item-phone">${escapeHtml(a.phone)}</span>
         <span class="admin-item-name">${escapeHtml(a.name || "")}</span>
-        <button data-phone="${escapeHtml(a.phone)}">取消负责人</button>
-      </div>`)
+        ${delBtn}
+      </div>`;
+    })
     .join("");
   listEl.querySelectorAll("button").forEach((btn) => {
     btn.addEventListener("click", async () => {
+      if (!isAdminUser) return;
       await cloud.database.from("admins").delete().eq("phone", btn.dataset.phone);
       await loadAdminList();
     });
@@ -911,6 +944,7 @@ async function loadAdminList() {
 
 document.getElementById("btn-add-admin").addEventListener("click", async () => {
   if (!cloud) return;
+  if (!isAdminUser) { alert("仅管理员可授权负责人"); return; }
   const phone = document.getElementById("admin-phone").value.trim();
   if (!/^1\d{10}$/.test(phone)) { alert("请输入正确的 11 位手机号"); return; }
   const { data: exists } = await cloud.database.from("admins").select("id").eq("phone", phone).maybeSingle();
