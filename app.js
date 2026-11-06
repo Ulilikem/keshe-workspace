@@ -754,7 +754,7 @@ async function loadTemplates() {
   });
 }
 
-// 加载生成页的主题下拉选项
+// 加载生成页的主题下拉选项（按当前生成类型过滤分类）
 async function loadTemplateOptions() {
   if (!cloud) return;
   const select = document.getElementById("gen-template-select");
@@ -768,7 +768,11 @@ async function loadTemplateOptions() {
     return;
   }
 
-  const options = data
+  // 按生成类型过滤：通知类型只显示"通知类+格式要求"，推文类型只显示"推文宣传类+格式要求"
+  const targetCat = genType === "post" ? "post" : "notice";
+  const filtered = data.filter((g) => g.category === targetCat || g.category === "format");
+
+  const options = filtered
     .map((g) => `<option value="${g.id}">${escapeHtml(g.title)}（${CATEGORY_LABELS[g.category] || "其他"}）</option>`)
     .join("");
   select.innerHTML = '<option value="">不使用主题（用通用格式）</option>' + options;
@@ -781,6 +785,8 @@ document.querySelectorAll(".gen-type").forEach((btn) => {
     document.querySelectorAll(".gen-type").forEach((b) => b.classList.remove("active"));
     btn.classList.add("active");
     genType = btn.dataset.type;
+    // 切换类型后，重新加载匹配分类的主题下拉
+    loadTemplateOptions();
   });
 });
 
