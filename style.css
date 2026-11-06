@@ -130,6 +130,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
   display: flex; align-items: center; justify-content: center;
   font-size: 14px; font-weight: 600;
   flex-shrink: 0;
+  overflow: hidden;
 }
 .workspace-switch strong {
   color: #2d3b41;
@@ -216,7 +217,11 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
   border-top: 1px solid #ffffff6b;
   padding: 14px 4px 0;
   margin-top: 16px;
+  cursor: pointer;
+  border-radius: 12px;
+  transition: background 0.15s;
 }
+.workspace-user:hover { background: #ffffff3d; }
 .workspace-user strong { color: #344b54; font-size: 10px; display: block; }
 .workspace-user small, .version { color: #4d646e; font-size: 9px; }
 .workspace-user small { display: flex; align-items: center; gap: 4px; }
@@ -290,7 +295,11 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
   box-shadow: 0 2px 6px #1b3a4010;
   display: flex; align-items: center; justify-content: center;
   font-size: 13px; font-weight: 600;
+  overflow: hidden;
+  cursor: pointer;
+  transition: box-shadow 0.15s;
 }
+.top-avatar:hover { box-shadow: 0 4px 14px #1b3a4026; }
 
 main {
   padding: 32px 34px 18px;
@@ -581,6 +590,35 @@ main {
   content: ""; flex: 1; height: 1px; background: #dfe4e9;
 }
 .auth-wb { justify-content: center; width: 100%; }
+
+/* ===== 个人账号弹窗 ===== */
+.profile-hero {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 18px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid #e8ecef;
+}
+.profile-avatar {
+  width: 64px; height: 64px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #ffffffb5, #ffffff63);
+  border: 2px solid #ffffff;
+  color: #40565f;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 26px; font-weight: 700;
+  box-shadow: 0 6px 18px #1b3a4020;
+  flex-shrink: 0;
+  overflow: hidden;
+  cursor: pointer;
+}
+.profile-meta { display: flex; flex-direction: column; gap: 4px; }
+.profile-meta strong { font-size: 16px; color: #2f363a; }
+.profile-phone { font-size: 12px; color: #7a858d; }
+.profile-avatar-actions { display: flex; gap: 8px; }
+.profile-avatar-actions .button { flex: 1; justify-content: center; }
+.profile-logout { justify-content: center; width: 100%; }
 
 /* ===== 子标签 ===== */
 .sub-tabs {

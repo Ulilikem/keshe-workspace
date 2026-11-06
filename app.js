@@ -100,6 +100,11 @@ const topAvatar = document.getElementById("top-avatar");
 loginBtn.addEventListener("click", () => openAuthDialog());
 document.getElementById("auth-close").addEventListener("click", () => authDialog.close());
 
+// 点击侧栏用户区 / 顶部头像 → 打开个人账号页
+const workspaceUser = document.querySelector(".workspace-user");
+if (workspaceUser) workspaceUser.addEventListener("click", () => openProfileDialog());
+topAvatar.addEventListener("click", () => openProfileDialog());
+
 function openAuthDialog() {
   authDialog.showModal();
 }
@@ -229,6 +234,9 @@ document.getElementById("auth-workbuddy").addEventListener("click", async () => 
 });
 
 // ===== 会话恢复与用户信息 =====
+// 当前登录用户的完整信息缓存（含自定义昵称/头像）
+let currentUserInfo = null;
+
 async function refreshUser() {
   if (!cloud) return;
   const { data: session, error } = await cloud.auth.getSession();
@@ -236,6 +244,7 @@ async function refreshUser() {
   const avatarEls = [document.getElementById("user-avatar"), document.getElementById("top-avatar")];
 
   if (error || !session) {
+    currentUserInfo = null;
     nameEl.textContent = "未登录";
     avatarEls.forEach((a) => (a.textContent = "访"));
     document.getElementById("env-pill").textContent = "未登录";
@@ -244,23 +253,58 @@ async function refreshUser() {
 
   const user = session.user || {};
   let name = user.name || "";
-  // OTP 登录时 session.user 无 name，需用 getUser() 获取
-  if (!name) {
+  let phone = user.phone || "";
+  let email = user.email || "";
+  let avatarUrl = user.avatarUrl || "";
+  let uid = user.id || user.sub || "";
+  // OTP 登录时 session.user 无 name/phone，需用 getUser() 获取
+  try {
+    const u = await cloud.auth.getUser();
+    name = name || u.data?.name || "";
+    phone = phone || u.data?.phone || "";
+    email = email || u.data?.email || "";
+    avatarUrl = avatarUrl || u.data?.avatarUrl || "";
+    uid = uid || u.data?.id || u.data?.sub || "";
+  } catch (e) {
+    // 忽略，使用 session 内已有字段
+  }
+
+  // 读取自定义资料（昵称/头像），优先展示用户自己设置的
+  let custom = { name: "", avatarUrl: "" };
+  if (uid && cloud.database) {
     try {
-      const u = await cloud.auth.getUser();
-      name = u.data?.name || u.data?.phone || "";
+      const { data } = await cloud.database.from("profiles").select("name, avatar_url").eq("uid", uid).maybeSingle();
+      if (data) custom = { name: data.name || "", avatarUrl: data.avatar_url || "" };
     } catch (e) {
-      name = "";
+      // profiles 表可能不存在或无权访问，忽略
     }
   }
-  if (!name) name = "已登录";
-  const initial = (name || "用").charAt(0);
-  nameEl.textContent = name;
-  avatarEls.forEach((a) => (a.textContent = initial));
+
+  const displayName = custom.name || name || phone || email || "已登录";
+  currentUserInfo = {
+    uid, name, phone, email, avatarUrl,
+    customName: custom.name, customAvatarUrl: custom.avatarUrl,
+    displayName,
+  };
+
+  nameEl.textContent = displayName;
+  const initial = (displayName || "用").charAt(0);
+  applyAvatar(avatarEls, custom.avatarUrl, initial);
   document.getElementById("env-pill").textContent = "已登录";
 
   // 登录后自动认领负责人身份：若自己的手机号在 admins 表但尚未绑定 uid，则补上（用于数据库 RLS 判定管理员）
   claimAdminIfNeeded();
+}
+
+// 给头像元素设置显示：有自定义头像则用图片，否则用首字母
+function applyAvatar(els, avatarUrl, initial) {
+  els.forEach((a) => {
+    if (avatarUrl) {
+      a.innerHTML = `<img src="${escapeHtml(avatarUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:inherit;" />`;
+    } else {
+      a.textContent = initial;
+    }
+  });
 }
 
 async function claimAdminIfNeeded() {
@@ -279,6 +323,158 @@ async function claimAdminIfNeeded() {
     // 忽略认领失败，不影响正常使用
   }
 }
+
+// ===== 个人账号 =====
+const profileDialog = document.getElementById("profile-dialog");
+let pendingAvatarFile = null; // 待上传的头像文件
+
+// 打开个人账号弹窗
+function openProfileDialog() {
+  if (!cloud) { alert("服务未连接，请刷新重试"); return; }
+  if (!currentUserInfo) {
+    // 未登录，引导登录
+    openAuthDialog();
+    return;
+  }
+  renderProfile();
+  profileDialog.showModal();
+}
+
+// 渲染个人账号信息
+function renderProfile() {
+  const info = currentUserInfo;
+  const name = info.customName || info.name || info.phone || info.email || "已登录";
+  const avatarUrl = info.customAvatarUrl || info.avatarUrl || "";
+
+  document.getElementById("profile-name").textContent = name;
+  document.getElementById("profile-name-input").value = name;
+
+  // 手机号/邮箱脱敏显示
+  const contact = info.phone ? maskPhone(info.phone) : (info.email ? maskEmail(info.email) : "未绑定手机/邮箱");
+  document.getElementById("profile-phone").textContent = contact;
+
+  // 头像
+  const av = document.getElementById("profile-avatar");
+  if (avatarUrl) {
+    av.innerHTML = `<img src="${escapeHtml(avatarUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:inherit;" />`;
+  } else {
+    av.textContent = (name || "用").charAt(0);
+  }
+
+  document.getElementById("profile-error").textContent = "";
+  pendingAvatarFile = null;
+}
+
+function maskPhone(p) {
+  const s = normalizePhone(p);
+  if (s.length >= 11) return s.slice(0, 3) + "****" + s.slice(-4);
+  return p;
+}
+function maskEmail(e) {
+  const [local, domain] = String(e).split("@");
+  if (!domain) return e;
+  const head = local.slice(0, 2) + "***";
+  return head + "@" + domain;
+}
+
+// 保存昵称
+document.getElementById("profile-save").addEventListener("click", async () => {
+  const errEl = document.getElementById("profile-error");
+  errEl.textContent = "";
+  const name = document.getElementById("profile-name-input").value.trim();
+  if (!name) { errEl.textContent = "昵称不能为空"; return; }
+
+  const uid = currentUserInfo.uid;
+  if (!uid || !cloud.database) { errEl.textContent = "当前账号不支持保存昵称"; return; }
+
+  try {
+    // upsert 到 profiles 表
+    await cloud.database.from("profiles").upsert(
+      { uid, name, updated_at: new Date().toISOString() },
+      { onConflict: "uid" }
+    );
+    // 上传头像（若有待上传文件）
+    if (pendingAvatarFile) {
+      const path = cloud.storage.userPath(uid, "avatar");
+      const { error: upErr } = await cloud.storage.upload(path, pendingAvatarFile, {
+        contentType: pendingAvatarFile.type || "image/png",
+        upsert: true,
+      });
+      if (upErr) { errEl.textContent = "头像上传失败：" + (upErr.message || upErr); return; }
+      // 生成签名 URL 存到 profiles
+      const { data: urlData } = await cloud.storage.createSignedUrl(path, 31536000);
+      const avatarUrl = urlData?.url || urlData?.signedUrl || urlData || "";
+      if (avatarUrl) {
+        await cloud.database.from("profiles").upsert(
+          { uid, avatar_url: avatarUrl },
+          { onConflict: "uid" }
+        );
+      }
+    }
+    errEl.textContent = "";
+    profileDialog.close();
+    await refreshUser();
+  } catch (e) {
+    errEl.textContent = "保存失败：" + (e.message || "请稍后重试");
+  }
+});
+
+// 选择头像文件
+document.getElementById("profile-upload-avatar").addEventListener("click", () => {
+  document.getElementById("profile-avatar-file").click();
+});
+document.getElementById("profile-avatar-file").addEventListener("change", (e) => {
+  const file = e.target.files && e.target.files[0];
+  if (!file) return;
+  // 限制大小 2MB
+  if (file.size > 2 * 1024 * 1024) {
+    document.getElementById("profile-error").textContent = "图片不能超过 2MB";
+    e.target.value = "";
+    return;
+  }
+  pendingAvatarFile = file;
+  // 本地预览
+  const reader = new FileReader();
+  reader.onload = () => {
+    const av = document.getElementById("profile-avatar");
+    av.innerHTML = `<img src="${reader.result}" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:inherit;" />`;
+  };
+  reader.readAsDataURL(file);
+});
+
+// 恢复默认头像
+document.getElementById("profile-remove-avatar").addEventListener("click", async () => {
+  const errEl = document.getElementById("profile-error");
+  errEl.textContent = "";
+  const uid = currentUserInfo?.uid;
+  if (!uid || !cloud.database) { errEl.textContent = "当前账号不支持修改头像"; return; }
+  try {
+    await cloud.database.from("profiles").upsert({ uid, avatar_url: "" }, { onConflict: "uid" });
+    pendingAvatarFile = null;
+    const name = document.getElementById("profile-name-input").value.trim() || "用";
+    document.getElementById("profile-avatar").textContent = name.charAt(0);
+    await refreshUser();
+    errEl.textContent = "";
+  } catch (e) {
+    errEl.textContent = "操作失败：" + (e.message || "");
+  }
+});
+
+// 退出登录
+document.getElementById("profile-logout").addEventListener("click", async () => {
+  if (!cloud) return;
+  if (!confirm("确定要退出登录吗？")) return;
+  try {
+    await cloud.auth.signOut();
+    profileDialog.close();
+    currentUserInfo = null;
+    await refreshUser();
+  } catch (e) {
+    alert("退出失败：" + (e.message || "请重试"));
+  }
+});
+
+document.getElementById("profile-close").addEventListener("click", () => profileDialog.close());
 
 // ===== 启动 =====
 async function bootstrap() {
