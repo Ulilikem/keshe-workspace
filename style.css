@@ -147,7 +147,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
   color: #52646b;
   font-size: 10px;
   letter-spacing: 0.7px;
-  margin-bottom: 8px;
+  margin-top: 18px;
+  margin-bottom: 10px;
   padding-inline: 11px;
   text-transform: uppercase;
 }
