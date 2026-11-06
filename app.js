@@ -69,6 +69,10 @@ function switchView(view) {
   if (view === "profile") {
     renderProfile();
   }
+  // 视图切换后重新测量橡皮筋分段选择器（页面从 hidden 变为可见）
+  requestAnimationFrame(() => {
+    if (typeof remeasureRubberSegments === "function") remeasureRubberSegments();
+  });
 }
 
 // ===== 侧栏收起 =====
@@ -81,7 +85,7 @@ document.getElementById("toggle-sidebar").addEventListener("click", () => {
 });
 
 // ===== 导航绑定 =====
-document.querySelectorAll(".nav-item[data-view], .button[data-view]").forEach((el) => {
+document.querySelectorAll(".nav-item[data-view], .button[data-view], .visual-card[data-view]").forEach((el) => {
   el.addEventListener("click", () => switchView(el.dataset.view));
 });
 
@@ -252,7 +256,9 @@ async function refreshUser() {
     currentUserInfo = null;
     nameEl.textContent = "未登录";
     avatarEls.forEach((a) => (a.textContent = "访"));
-    document.getElementById("env-pill").textContent = "未登录";
+    // 未登录：只显示胶囊登录按钮，隐藏头像
+    if (loginBtn) loginBtn.hidden = false;
+    if (topAvatar) topAvatar.hidden = true;
     return;
   }
 
@@ -283,6 +289,17 @@ async function refreshUser() {
     } catch (e) {
       // profiles 表可能不存在或无权访问，忽略
     }
+    // 头像签名 URL 有效期短（最长 1 小时），每次刷新页面重新签名，避免头像过期失效
+    if (custom.avatarUrl && cloud.storage) {
+      try {
+        const path = cloud.storage.userPath(uid, "avatar");
+        const { data: urlData } = await cloud.storage.createSignedUrl(path, 3600);
+        const fresh = urlData?.url || urlData?.signedUrl || "";
+        if (fresh) custom.avatarUrl = fresh;
+      } catch (e) {
+        // 重新签名失败则沿用已存 URL，不阻断登录
+      }
+    }
   }
 
   const displayName = custom.name || name || phone || email || "已登录";
@@ -295,10 +312,16 @@ async function refreshUser() {
   nameEl.textContent = displayName;
   const initial = (displayName || "用").charAt(0);
   applyAvatar(avatarEls, custom.avatarUrl, initial);
-  document.getElementById("env-pill").textContent = "已登录";
+  // 已登录：只显示头像，隐藏登录按钮
+  if (loginBtn) loginBtn.hidden = true;
+  if (topAvatar) topAvatar.hidden = false;
 
   // 登录后自动认领负责人身份：若自己的手机号在 admins 表但尚未绑定 uid，则补上（用于数据库 RLS 判定管理员）
   claimAdminIfNeeded();
+
+  // 登录状态变化后，刷新各页面的权限控件（添加活动按钮、记账按钮等）
+  if (typeof checkReminderPermission === "function") checkReminderPermission();
+  if (typeof checkScorePermission === "function") checkScorePermission();
 }
 
 // 给头像元素设置显示：有自定义头像则用图片，否则用首字母
@@ -387,6 +410,49 @@ function renderProfile() {
 
   document.getElementById("profile-error").textContent = "";
   pendingAvatarFile = null;
+
+  // 成员身份认领
+  renderMemberClaim();
+}
+
+// 加载并渲染「成员身份认领」区
+async function renderMemberClaim() {
+  const boundBox = document.getElementById("profile-claim-bound");
+  const unboundBox = document.getElementById("profile-claim-unbound");
+  const errEl = document.getElementById("profile-claim-error");
+  errEl.textContent = "";
+
+  if (!currentUserInfo || !cloud.database) return;
+  const uid = currentUserInfo.uid;
+
+  try {
+    // 查我是否已认领某个成员
+    const { data: mine } = await cloud.database.from("member_meta").select("name, role").eq("uid", uid).maybeSingle();
+    if (mine) {
+      // 已认领
+      document.getElementById("profile-claim-name").textContent = mine.name || "";
+      document.getElementById("profile-claim-role").textContent = mine.role || "";
+      boundBox.hidden = false;
+      unboundBox.hidden = true;
+      return;
+    }
+    // 未认领：列出所有 active 且未被认领的成员（与 loadMemberOptions 一致的查询方式）
+    const { data: all } = await cloud.database.from("member_meta").select("name, role, status, uid").order("name");
+    const available = (all || []).filter((m) => m.status !== "disabled" && !m.uid);
+    const select = document.getElementById("profile-claim-select");
+    if (available.length === 0) {
+      select.innerHTML = '<option value="">暂无可认领的成员</option>';
+    } else {
+      select.innerHTML = '<option value="">请选择你的名字</option>' +
+        available.map((m) => `<option value="${escapeHtml(m.name)}">${escapeHtml(m.name)}${m.role ? "（" + escapeHtml(m.role) + "）" : ""}</option>`).join("");
+    }
+    boundBox.hidden = true;
+    unboundBox.hidden = false;
+  } catch (e) {
+    // 忽略，保持默认未认领
+    boundBox.hidden = true;
+    unboundBox.hidden = false;
+  }
 }
 
 function maskPhone(p) {
@@ -403,6 +469,39 @@ function maskEmail(e) {
 
 // 未登录时的登录按钮
 document.getElementById("profile-guest-login").addEventListener("click", () => openAuthDialog());
+
+// 绑定成员身份
+document.getElementById("profile-claim-btn").addEventListener("click", async () => {
+  const errEl = document.getElementById("profile-claim-error");
+  errEl.textContent = "";
+  const name = document.getElementById("profile-claim-select").value;
+  if (!name) { errEl.textContent = "请先在列表里选择你的名字"; return; }
+  const uid = currentUserInfo?.uid;
+  if (!uid || !cloud.database) { errEl.textContent = "当前账号不支持绑定身份"; return; }
+  try {
+    // 通过 RPC（SECURITY DEFINER）认领，绕过 member_meta 仅管理员可更新的 RLS 限制
+    const { data: ok } = await cloud.database.rpc("claim_member", { member_name: name });
+    if (!ok) { errEl.textContent = "该成员已被其他账号绑定"; }
+    await renderMemberClaim();
+    await refreshUser();
+  } catch (e) {
+    errEl.textContent = "绑定失败：" + (e.message || "请稍后重试");
+  }
+});
+
+// 解除成员身份绑定
+document.getElementById("profile-claim-unbind").addEventListener("click", async () => {
+  const errEl = document.getElementById("profile-claim-error");
+  errEl.textContent = "";
+  const uid = currentUserInfo?.uid;
+  if (!uid || !cloud.database) { errEl.textContent = "当前账号不支持解绑"; return; }
+  try {
+    await cloud.database.rpc("unclaim_member", {});
+    await renderMemberClaim();
+  } catch (e) {
+    errEl.textContent = "解绑失败：" + (e.message || "请稍后重试");
+  }
+});
 
 // 保存昵称
 document.getElementById("profile-save").addEventListener("click", async () => {
@@ -423,13 +522,19 @@ document.getElementById("profile-save").addEventListener("click", async () => {
     // 上传头像（若有待上传文件）
     if (pendingAvatarFile) {
       const path = cloud.storage.userPath(uid, "avatar");
+      // 先删除旧头像，避免「路径已存在」导致覆盖失败（后端对 upsert 头支持不稳定）
+      try {
+        await cloud.storage.remove([path]);
+      } catch (e) {
+        // 旧头像可能不存在，忽略删除失败
+      }
       const { error: upErr } = await cloud.storage.upload(path, pendingAvatarFile, {
         contentType: pendingAvatarFile.type || "image/png",
         upsert: true,
       });
       if (upErr) { errEl.textContent = "头像上传失败：" + (upErr.message || upErr); return; }
-      // 生成签名 URL 存到 profiles
-      const { data: urlData } = await cloud.storage.createSignedUrl(path, 31536000);
+      // 生成签名 URL 存到 profiles（SDK 限制 1~3600 秒，取最大值 1 小时）
+      const { data: urlData } = await cloud.storage.createSignedUrl(path, 3600);
       const avatarUrl = urlData?.url || urlData?.signedUrl || urlData || "";
       if (avatarUrl) {
         await cloud.database.from("profiles").upsert(
@@ -531,6 +636,10 @@ async function bootstrap() {
       }
     }
   }
+  // 增强两处子标签为橡皮筋分段选择器
+  initRubberSegments();
+  // 为概览页三个指标卡片添加光晕效果
+  initBorderGlow();
 }
 
 // ===== 公文模板模块 =====
@@ -1059,7 +1168,7 @@ function formatDate(iso) {
 
 // ===== 加减分模块 =====
 const BASE_SCORE = 85; // 基础分
-const EXCLUDED_MEMBERS = ["孙诗琪", "范佳宁"]; // 不参与考核（负责人本人）
+const EXCLUDED_MEMBERS = ["孙诗琪", "范佳宁", "陈健豪", "孙催办"]; // 不参与考核（负责人本人 / 测试账号）
 const SUPER_ADMIN_PHONE = "15086653768"; // 唯一能清空记录的人
 
 // 子标签切换（加减分页）
@@ -1117,7 +1226,9 @@ function renderScorePermission() {
   } else {
     hint.textContent = "你当前是只读身份，仅负责人可以记账。";
   }
-  document.getElementById("btn-score-save").disabled = !isAdminUser;
+  // 保存按钮不再 disabled，非负责人点击时弹出权限提示（见 click 回调）
+  const saveBtn = document.getElementById("btn-score-save");
+  if (saveBtn) saveBtn.disabled = false;
   // 清空记录按钮：仅超级管理员可见
   const clearBtn = document.getElementById("btn-clear-records");
   if (clearBtn) clearBtn.hidden = !(normalizePhone(currentUserPhone || "") === SUPER_ADMIN_PHONE);
@@ -1138,10 +1249,10 @@ async function loadMemberOptions() {
 async function loadMemberList() {
   if (!cloud) return;
   const listEl = document.getElementById("member-list");
-  // 权限：仅管理员可增删改成员
+  // 权限：仅管理员可增删改成员；按钮始终显示，点击时弹提示
   await checkScorePermission();
-  document.getElementById("btn-add-member").hidden = !isAdminUser;
-  const { data } = await cloud.database.from("member_meta").select("name, role, status").order("name");
+  document.getElementById("btn-add-member").hidden = false;
+  const { data } = await cloud.database.from("member_meta").select("name, role, status, uid").order("name");
   if (!data || data.length === 0) {
     listEl.innerHTML = '<div class="empty-state"><p>暂无成员，点击右上角「添加成员」。</p></div>';
     return;
@@ -1149,6 +1260,7 @@ async function loadMemberList() {
   listEl.innerHTML = data
     .map((m) => {
       const disabled = m.status === "disabled";
+      const bound = !!m.uid;
       const actions = isAdminUser
         ? `<div class="member-item-actions">
           <button data-act="edit" data-name="${escapeHtml(m.name)}">编辑</button>
@@ -1159,6 +1271,7 @@ async function loadMemberList() {
       <div class="member-item ${disabled ? "disabled" : ""}">
         <span class="member-item-name">${escapeHtml(m.name)}</span>
         <span class="member-item-role">${escapeHtml(m.role || "")}</span>
+        ${bound ? '<span class="member-item-bound" title="该成员已绑定登录账号">已绑定</span>' : ""}
         ${disabled ? '<span class="member-item-status">已停用</span>' : ""}
         ${actions}
       </div>`;
@@ -1186,6 +1299,7 @@ const memberDialog = document.getElementById("member-dialog");
 let editingMemberName = null;
 
 document.getElementById("btn-add-member").addEventListener("click", () => {
+  if (!isAdminUser) { showPermissionToast("你没有权限添加成员，仅负责人可以操作。"); return; }
   editingMemberName = null;
   document.getElementById("member-dialog-title").textContent = "添加成员";
   document.getElementById("member-name").value = "";
@@ -1274,7 +1388,7 @@ async function loadAdminList() {
 
 document.getElementById("btn-add-admin").addEventListener("click", async () => {
   if (!cloud) return;
-  if (!isAdminUser) { alert("仅管理员可授权负责人"); return; }
+  if (!isAdminUser) { showPermissionToast("你没有权限授权负责人，仅管理员可以操作。"); return; }
   const phone = document.getElementById("admin-phone").value.trim();
   if (!/^1\d{10}$/.test(phone)) { alert("请输入正确的 11 位手机号"); return; }
   const { data: exists } = await cloud.database.from("admins").select("id").eq("phone", phone).maybeSingle();
@@ -1289,6 +1403,7 @@ document.getElementById("btn-add-admin").addEventListener("click", async () => {
 let scoreDir = "add"; // add | sub
 document.querySelectorAll('#subtab-score-entry .gen-type[data-dir]').forEach((btn) => {
   btn.addEventListener("click", () => {
+    if (!isAdminUser) { showPermissionToast("你没有权限记账，仅负责人可以操作。"); return; }
     document.querySelectorAll('#subtab-score-entry .gen-type[data-dir]').forEach((b) => b.classList.remove("active"));
     btn.classList.add("active");
     scoreDir = btn.dataset.dir;
@@ -1299,6 +1414,7 @@ document.querySelectorAll('#subtab-score-entry .gen-type[data-dir]').forEach((bt
 let scoreVal = 1;
 document.querySelectorAll(".score-quick-btn").forEach((btn) => {
   btn.addEventListener("click", () => {
+    if (!isAdminUser) { showPermissionToast("你没有权限记账，仅负责人可以操作。"); return; }
     document.querySelectorAll(".score-quick-btn").forEach((b) => b.classList.remove("active"));
     btn.classList.add("active");
     scoreVal = Number(btn.dataset.val);
@@ -1306,6 +1422,7 @@ document.querySelectorAll(".score-quick-btn").forEach((btn) => {
   });
 });
 document.getElementById("score-value").addEventListener("input", (e) => {
+  if (!isAdminUser) { showPermissionToast("你没有权限记账，仅负责人可以操作。"); e.target.value = ""; return; }
   if (e.target.value !== "") {
     document.querySelectorAll(".score-quick-btn").forEach((b) => b.classList.remove("active"));
     scoreVal = Number(e.target.value);
@@ -1317,9 +1434,28 @@ document.getElementById("score-date").value = new Date().toISOString().slice(0, 
 
 function showScoreError(msg) { document.getElementById("score-error").textContent = msg || ""; }
 
+// 轻量权限提示 toast（非负责人尝试越权操作时弹出）
+let permissionToastTimer = null;
+function showPermissionToast(msg) {
+  let toast = document.getElementById("permission-toast");
+  if (!toast) {
+    toast = document.createElement("div");
+    toast.id = "permission-toast";
+    toast.className = "permission-toast";
+    toast.setAttribute("role", "status");
+    document.body.appendChild(toast);
+  }
+  toast.textContent = msg;
+  toast.classList.add("show");
+  clearTimeout(permissionToastTimer);
+  permissionToastTimer = setTimeout(() => {
+    toast.classList.remove("show");
+  }, 2600);
+}
+
 document.getElementById("btn-score-save").addEventListener("click", async () => {
   if (!cloud) { showScoreError("服务未连接"); return; }
-  if (!isAdminUser) { showScoreError("仅负责人可以记账"); return; }
+  if (!isAdminUser) { showPermissionToast("你没有权限记账，仅负责人可以操作。"); return; }
   showScoreError("");
 
   const member = document.getElementById("score-member").value;
@@ -1493,16 +1629,31 @@ document.getElementById("btn-export-excel").addEventListener("click", async () =
   const memberList = (members || []).filter((m) => !EXCLUDED_MEMBERS.includes(m.name));
   const scoreList = scores || [];
 
-  // 汇总 sheet：每人基础分85 + 累计
+  // 汇总 sheet：每人基础分85 + 加分/扣分分别统计 + 理由汇总
   const summaryRows = memberList.map((m) => {
-    const sum = scoreList.filter((s) => s.member === m.name).reduce((acc, s) => acc + s.delta, 0);
+    const mine = scoreList.filter((s) => s.member === m.name);
+    let addSum = 0, subSum = 0;
+    const addReasons = [], subReasons = [];
+    mine.forEach((s) => {
+      if (s.delta > 0) {
+        addSum += s.delta;
+        if (s.reason) addReasons.push(`+${s.delta} ${s.reason}`);
+      } else if (s.delta < 0) {
+        subSum += s.delta;
+        if (s.reason) subReasons.push(`${s.delta} ${s.reason}`);
+      }
+    });
+    const sum = addSum + subSum;
     return {
       排名: 0,
       姓名: m.name,
       职务: m.role || "",
       状态: m.status === "disabled" ? "已停用" : "正常",
       基础分: BASE_SCORE,
-      累计加减分: sum,
+      累计加分: addSum || "",
+      累计扣分: subSum || "",
+      加分理由: addReasons.join("；") || "",
+      扣分理由: subReasons.join("；") || "",
       当前总分: BASE_SCORE + sum,
     };
   });
@@ -1520,8 +1671,11 @@ document.getElementById("btn-export-excel").addEventListener("click", async () =
   }));
 
   const summaryData = [
-    ["排名", "姓名", "职务", "状态", "基础分", "累计加减分", "当前总分"],
-    ...summaryRows.map((r) => [r["排名"], r["姓名"], r["职务"], r["状态"], r["基础分"], r["累计加减分"], r["当前总分"]]),
+    ["排名", "姓名", "职务", "状态", "基础分", "累计加分", "累计扣分", "加分理由", "扣分理由", "当前总分"],
+    ...summaryRows.map((r) => [
+      r["排名"], r["姓名"], r["职务"], r["状态"], r["基础分"],
+      r["累计加分"], r["累计扣分"], r["加分理由"], r["扣分理由"], r["当前总分"],
+    ]),
   ];
   const detailData = [
     ["姓名", "类型", "分值", "理由", "记录人", "时间"],
@@ -1534,7 +1688,7 @@ document.getElementById("btn-export-excel").addEventListener("click", async () =
     const ws1 = XLSX.utils.aoa_to_sheet(summaryData);
     const ws2 = XLSX.utils.aoa_to_sheet(detailData);
     // 设置列宽
-    ws1["!cols"] = [{ wch: 6 }, { wch: 10 }, { wch: 10 }, { wch: 8 }, { wch: 8 }, { wch: 12 }, { wch: 10 }];
+    ws1["!cols"] = [{ wch: 6 }, { wch: 10 }, { wch: 10 }, { wch: 8 }, { wch: 8 }, { wch: 10 }, { wch: 10 }, { wch: 40 }, { wch: 40 }, { wch: 10 }];
     ws2["!cols"] = [{ wch: 10 }, { wch: 6 }, { wch: 8 }, { wch: 40 }, { wch: 12 }, { wch: 20 }];
     XLSX.utils.book_append_sheet(wb, ws1, "积分汇总");
     XLSX.utils.book_append_sheet(wb, ws2, "加减分明细");
@@ -1609,8 +1763,8 @@ async function checkReminderPermission() {
   const hint = document.getElementById("reminder-permission-hint");
   if (!session.data) {
     isActivityAdmin = false;
-    if (btnAdd) btnAdd.hidden = true;
-    if (hint) hint.textContent = "";
+    if (btnAdd) btnAdd.hidden = false; // 未登录也显示按钮，点击时提示需登录/无权限
+    if (hint) hint.textContent = "（登录后可添加）";
     renderActivityAdminControls();
     return;
   }
@@ -1628,7 +1782,7 @@ async function checkReminderPermission() {
   const { data } = await cloud.database.from("admins").select("phone");
   const admins = data || [];
   isActivityAdmin = admins.some((a) => normalizePhone(a.phone) === phone && phone !== "");
-  if (btnAdd) btnAdd.hidden = !isActivityAdmin;
+  if (btnAdd) btnAdd.hidden = false; // 始终显示，非管理员点击时弹权限提示
   if (hint) hint.textContent = isActivityAdmin ? "（你是管理员，可增删活动）" : "（只读，仅管理员可增删活动）";
   renderActivityAdminControls();
 }
@@ -1719,7 +1873,10 @@ const activityDialog = document.getElementById("activity-dialog");
 let editingActivityId = null;
 
 document.getElementById("btn-add-activity").addEventListener("click", () => {
-  if (!isActivityAdmin) return;
+  if (!isActivityAdmin) {
+    showPermissionToast("你没有权限添加活动，仅负责人可以操作。");
+    return;
+  }
   editingActivityId = null;
   document.getElementById("activity-dialog-title").textContent = "添加活动";
   document.getElementById("activity-title").value = "";
@@ -1843,5 +2000,747 @@ async function checkDueReminders() {
   const names = due.map((a) => a.title).join("、");
   alert(`⏰ 活动提醒\n\n以下活动已到提醒时间：\n${names}`);
 }
+
+// ===== 橡皮筋分段选择器（RubberSegment 原生移植） =====
+// 为 #view-templates 与 #view-scores 的 .sub-tabs 注入滑块层，
+// 复用现有 .sub-tab 的 click/data-subtab 逻辑，只增强视觉与拖拽手感。
+function initRubberSegments() {
+  const groups = document.querySelectorAll("#view-templates .sub-tabs, #view-scores .sub-tabs");
+  groups.forEach((track) => {
+    if (track.classList.contains("rs-enabled")) return;
+    track.classList.add("rs-enabled");
+
+    const tabs = Array.from(track.querySelectorAll(":scope > .sub-tab"));
+    if (tabs.length < 2) return;
+
+    // 读取轨道内边距（CSS padding: 4px）
+    const cs = getComputedStyle(track);
+    const pad = parseFloat(cs.paddingTop) || 4;
+    const inset = pad;
+
+    // 构建滑块层 + 副本按钮（反色）
+    const thumb = document.createElement("div");
+    thumb.className = "rs-thumb";
+    thumb.setAttribute("aria-hidden", "true");
+    tabs.forEach((t) => {
+      const copy = document.createElement("span");
+      copy.className = "sub-tab-copy";
+      copy.innerHTML = t.innerHTML; // 复制图标 + 文字
+      thumb.appendChild(copy);
+    });
+    track.appendChild(thumb);
+
+    // 状态
+    let slots = [];        // 每个 tab 的 {l, r}（相对轨道内容，不含 inset）
+    let edgeL = 0;         // 滑块左边缘（相对内容区，含 inset 计算）
+    let edgeR = 0;
+    let committed = Math.max(0, tabs.findIndex((t) => t.classList.contains("active")));
+    let dragging = false;
+    let onThumb = false;
+    let downX = 0;
+    let grabOffset = 0;
+    let thumbW = 0;
+    let live = false;
+    let hist = [];         // [[time, x], ...]
+    let animId = null;
+
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    const RUBBER = 0.55;
+    const DEADZONE = 4;
+    const SLOP = 10;
+    const FLICK = 110;
+    const MAX_V = 2000;
+
+    const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+    const rubber = (over, dim) => (over * dim * RUBBER) / (dim + RUBBER * Math.abs(over));
+
+    const measure = () => {
+      // 轨道不可见（hidden 或被折叠）时跳过，等待可见后由 ResizeObserver/remeasure 触发
+      if (!track.clientWidth) return;
+      const rect = track.getBoundingClientRect();
+      const padL = parseFloat(getComputedStyle(track).paddingLeft) || inset;
+      slots = tabs.map((t) => {
+        const r = t.getBoundingClientRect();
+        return { l: r.left - rect.left - padL, r: r.right - rect.left - padL };
+      });
+      // 对齐副本按钮位置与宽度
+      thumb.querySelectorAll(".sub-tab-copy").forEach((copy, i) => {
+        const s = slots[i];
+        if (!s) return;
+        copy.style.left = `${s.l}px`;
+        copy.style.width = `${s.r - s.l}px`;
+      });
+      applyClip();
+    };
+
+    const applyClip = () => {
+      const innerW = track.clientWidth - inset * 2;
+      const l = clamp(edgeL, 0, innerW);
+      const r = clamp(edgeR, 0, innerW);
+      const rr = Math.max(0, innerW - r);
+      const ll = Math.max(0, l);
+      const rad = 18;
+      thumb.style.clipPath = `inset(0 ${rr}px 0 ${ll}px round ${rad}px)`;
+    };
+
+    // 立即跳转到槽位 i
+    const jumpTo = (i) => {
+      const s = slots[i];
+      if (!s) return;
+      edgeL = s.l;
+      edgeR = s.r;
+      applyClip();
+    };
+
+    // 弹簧动画到目标槽位
+    const springTo = (i, opts = {}) => {
+      const s = slots[i];
+      if (!s) return;
+      if (reduceMotion) { jumpTo(i); return; }
+      cancelAnim();
+      const fromL = edgeL, fromR = edgeR;
+      const toL = s.l, toR = s.r;
+      const start = performance.now();
+      // 阻尼弹簧：zeta=1 临界阻尼（平滑无过冲，一次到位）
+      const dur = opts.momentum ? 360 : 320;
+      const omega = 2 * Math.PI / (dur / 1000); // 固有频率
+      const zeta = 1.0; // 临界阻尼：无过冲、无回弹
+      const wd = omega * Math.sqrt(1 - zeta * zeta);
+      const alpha = zeta * omega;
+
+      const step = (now) => {
+        const t = (now - start) / 1000;
+        const T = dur / 1000;
+        if (t >= T) {
+          edgeL = toL; edgeR = toR;
+          applyClip();
+          return;
+        }
+        let k;
+        if (zeta === 1) {
+          // 临界阻尼：x(t) = 1 - e^(-ωt)(1 + ωt)
+          k = 1 - Math.exp(-omega * t) * (1 + omega * t);
+        } else {
+          const decay = Math.exp(-alpha * t);
+          const osc = Math.cos(wd * t) + (alpha / wd) * Math.sin(wd * t);
+          k = 1 - decay * osc;
+        }
+        edgeL = fromL + (toL - fromL) * k;
+        edgeR = fromR + (toR - fromR) * k;
+        applyClip();
+        animId = requestAnimationFrame(step);
+      };
+      animId = requestAnimationFrame(step);
+    };
+
+    const cancelAnim = () => { if (animId) { cancelAnimationFrame(animId); animId = null; } };
+
+    const commit = (i) => {
+      if (i < 0 || i >= tabs.length) return;
+      // 先触发 click（切换 active），再更新 committed；
+      // 这样 MutationObserver 能检测到 committed 与 active 的差异并触发动画
+      if (!tabs[i].classList.contains("active")) {
+        tabs[i].click(); // 触发原有切换逻辑（后续由 MutationObserver 统一动画）
+      }
+      committed = i;
+    };
+
+    const nearestSlot = (x) => {
+      let best = committed;
+      for (let i = 0; i < slots.length; i++) {
+        const cx = (slots[i].l + slots[i].r) / 2;
+        const bx = (slots[best].l + slots[best].r) / 2;
+        if (Math.abs(cx - x) < Math.abs(bx - x)) best = i;
+      }
+      return best;
+    };
+
+    const velocityOf = (h, now) => {
+      const recent = h.filter(([t]) => now - t <= 100);
+      if (recent.length < 2) return 0;
+      const [t0, x0] = recent[0];
+      const [t1, x1] = recent[recent.length - 1];
+      return t1 - t0 >= 8 ? ((x1 - x0) / (t1 - t0)) * 1000 : 0;
+    };
+
+    const project = (v) => {
+      const d = 1 - 0.1 * Math.pow(0.05, 75 / 100);
+      return ((v / 1000) * d) / (1 - d);
+    };
+
+    const localX = (e) => {
+      const rect = track.getBoundingClientRect();
+      const padL = parseFloat(getComputedStyle(track).paddingLeft) || inset;
+      return e.clientX - rect.left - padL;
+    };
+
+    const release = () => {
+      dragging = false;
+      track.classList.remove("rs-dragging");
+      return { onThumb, live, downX };
+    };
+
+    // 指针事件：在 track 上监听，覆盖按钮点击
+    const onDown = (e) => {
+      if (e.button !== 0) return;
+      // 命中测试：是否落在滑块上
+      const x = localX(e);
+      onThumb = x >= edgeL && x <= edgeR;
+      dragging = true;
+      live = false;
+      downX = x;
+      grabOffset = onThumb ? x - edgeL : 0;
+      thumbW = edgeR - edgeL;
+      hist = [[e.timeStamp, x]];
+      if (onThumb) {
+        cancelAnim();
+        track.classList.add("rs-dragging");
+      }
+    };
+
+    const onMove = (e) => {
+      if (!dragging) return;
+      const x = localX(e);
+      if (!onThumb) return;
+      hist.push([e.timeStamp, x]);
+      if (hist.length > 8) hist.shift();
+      if (!live) {
+        if (Math.abs(x - downX) < DEADZONE) return;
+        live = true;
+        track.classList.add("rs-dragging");
+      }
+      const innerW = track.clientWidth - inset * 2;
+      const l = x - grabOffset;
+      const maxL = innerW - thumbW;
+      if (reduceMotion) {
+        edgeL = clamp(l, 0, maxL);
+        edgeR = edgeL + thumbW;
+      } else if (l < 0) {
+        edgeL = 0;
+        edgeR = thumbW - rubber(-l, thumbW);
+      } else if (l > maxL) {
+        edgeR = innerW;
+        edgeL = maxL + rubber(l - maxL, thumbW);
+      } else {
+        edgeL = l;
+        edgeR = l + thumbW;
+      }
+      applyClip();
+    };
+
+    const onUp = (e) => {
+      if (!dragging) return;
+      const wasThumb = onThumb, wasLive = live;
+      const x = localX(e);
+      release();
+      if (!wasThumb) return; // 点击未选中项：交给原生 click + MutationObserver 动画
+      if (!wasLive) {
+        // 点击滑块上的选中项：无切换，仅吸附回原位
+        if (slots.length) jumpTo(committed);
+        return;
+      }
+      // 拖拽松手：计算落点，由 onUp 自己负责动画（MutationObserver 检测不到差异）
+      const v = velocityOf(hist, e.timeStamp);
+      const flick = Math.abs(v) > FLICK;
+      let to = nearestSlot((edgeL + edgeR) / 2 + project(v));
+      if (flick && to === committed) to = clamp(to + Math.sign(v), 0, tabs.length - 1);
+      commit(to);
+      if (reduceMotion) jumpTo(to);
+      else springTo(to, { momentum: flick });
+    };
+
+    const onCancel = () => {
+      if (!dragging) return;
+      release();
+      springTo(committed, { squash: false });
+    };
+
+    track.addEventListener("pointerdown", onDown);
+    track.addEventListener("pointermove", onMove);
+    track.addEventListener("pointerup", onUp);
+    track.addEventListener("pointercancel", onCancel);
+
+    // 用 MutationObserver 监听 active 类变化（外部代码/键盘切换时同步滑块）
+    const syncObserver = new MutationObserver(() => {
+      const idx = tabs.findIndex((t) => t.classList.contains("active"));
+      if (idx >= 0 && idx !== committed && !dragging) {
+        committed = idx;
+        if (slots.length) springTo(idx, { squash: false });
+      }
+    });
+    tabs.forEach((t) => syncObserver.observe(t, { attributes: true, attributeFilter: ["class"] }));
+
+    // 初始定位 + 尺寸变化重测量
+    const doInit = () => {
+      measure();
+      if (slots.length) jumpTo(committed);
+    };
+    requestAnimationFrame(() => {
+      doInit();
+      requestAnimationFrame(doInit); // 二次确认，避免字体/布局未就绪
+    });
+
+    // 轨道尺寸变化（含 hidden→visible）时重测量
+    if (typeof ResizeObserver !== "undefined") {
+      const ro = new ResizeObserver(() => {
+        measure();
+        if (slots.length && !dragging) jumpTo(committed);
+      });
+      ro.observe(track);
+    }
+    window.addEventListener("resize", doInit);
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(doInit);
+
+    // 注册到全局 remeasure 列表，供视图切换时调用
+    if (!window.__rsRemeasurers) window.__rsRemeasurers = [];
+    window.__rsRemeasurers.push(() => {
+      measure();
+      if (slots.length && !dragging) jumpTo(committed);
+    });
+  });
+}
+
+// 供 switchView 调用的全局重测量入口
+function remeasureRubberSegments() {
+  if (window.__rsRemeasurers) window.__rsRemeasurers.forEach((fn) => fn());
+}
+
+// ===== 光晕卡片（BorderGlow 原生移植） =====
+// 为概览页三个 .metric 卡片注入鼠标跟随的光晕描边 + 柔光效果。
+function initBorderGlow() {
+  const cards = document.querySelectorAll("#view-overview .metric");
+  // 三个卡片分别用项目主题色：蓝 / 绿 / 琥珀
+  const colorMap = ["214 100% 44%", "165 56% 33%", "38 51% 42%"];
+  cards.forEach((card, idx) => {
+    if (card.classList.contains("bg-glow")) return;
+    card.classList.add("bg-glow");
+    card.style.setProperty("--glow-color", colorMap[idx] || colorMap[0]);
+    card.style.setProperty("--glow-op", "0");
+
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    // 鼠标移入：渐显光晕
+    card.addEventListener("pointerenter", () => {
+      if (reduceMotion) return;
+      card.style.setProperty("--glow-op", "1");
+    });
+    card.addEventListener("pointerleave", () => {
+      card.style.setProperty("--glow-op", "0");
+    });
+
+    // 鼠标移动：计算角度 + 边缘接近度 + 光斑位置
+    card.addEventListener("pointermove", (e) => {
+      if (reduceMotion) return;
+      const rect = card.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      const cx = rect.width / 2;
+      const cy = rect.height / 2;
+
+      // 角度：相对卡片中心，+90° 让高光指向鼠标方向
+      const dx = x - cx;
+      const dy = y - cy;
+      const radians = Math.atan2(dy, dx);
+      let angle = radians * (180 / Math.PI) + 90;
+      if (angle < 0) angle += 360;
+      card.style.setProperty("--glow-angle", `${angle}deg`);
+
+      // 边缘接近度：鼠标越靠边越强（0=中心，1=边缘）
+      let kx = Infinity, ky = Infinity;
+      if (dx !== 0) kx = cx / Math.abs(dx);
+      if (dy !== 0) ky = cy / Math.abs(dy);
+      const prox = Math.min(Math.max(1 / Math.min(kx, ky), 0), 1);
+      card.style.setProperty("--glow-prox", prox.toFixed(3));
+
+      // 柔光光斑位置
+      card.style.setProperty("--glow-x", `${(x / rect.width) * 100}%`);
+      card.style.setProperty("--glow-y", `${(y / rect.height) * 100}%`);
+    });
+  });
+}
+
+// ===== SpecularButton 流光按钮（原生 JS 移植自 React WebGL2 组件）=====
+(function initSpecularLoginButton() {
+  const PAD = 24;
+  const TAU = Math.PI * 2;
+
+  const VERTEX = `#version 300 es
+in vec2 aPosition;
+void main() {
+  gl_Position = vec4(aPosition, 0.0, 1.0);
+}`;
+
+  const FRAGMENT = `#version 300 es
+precision highp float;
+uniform vec2 uCenter;
+uniform vec2 uHalf;
+uniform float uRadius;
+uniform float uPx;
+uniform float uSpot;
+uniform vec2 uEntry;
+uniform vec3 uLineColor;
+uniform vec3 uBaseColor;
+uniform float uIntensity;
+uniform vec2 uWindow;
+uniform float uThickness;
+uniform float uGlow;
+out vec4 outColor;
+
+float roundedBox(vec2 p, vec2 b, float r) {
+  vec2 q = abs(p) - b + r;
+  return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+}
+
+float loopPosition(vec2 p, vec2 b, float r) {
+  vec2 inner = b - r;
+  float arc = 1.5707963 * r;
+  float quarter = inner.x + inner.y + arc;
+  vec2 a = abs(p);
+  vec2 q = a - inner;
+  float s = q.x > 0.0 && q.y > 0.0
+    ? inner.y + atan(q.y, q.x) * r
+    : (q.x > q.y ? min(a.y, inner.y) : inner.y + arc + inner.x - min(a.x, inner.x));
+  if (p.x < 0.0) s = p.y >= 0.0 ? 2.0 * quarter - s : 2.0 * quarter + s;
+  else if (p.y < 0.0) s = 4.0 * quarter - s;
+  return s / max(4.0 * quarter, 0.0001);
+}
+
+float lobe(float position, float center) {
+  float gap = abs(fract(position - center + 0.5) - 0.5);
+  return 1.0 - smoothstep(uWindow.x, uWindow.x + uWindow.y, gap);
+}
+
+void main() {
+  vec2 p = gl_FragCoord.xy - uCenter;
+  float d = roundedBox(p, uHalf, uRadius);
+  float position = loopPosition(p, uHalf, uRadius);
+  float key = lobe(position, uSpot);
+  float back = lobe(position, uSpot + 0.5);
+  float streak = key + back * 0.45;
+  float width = max(uThickness * uPx * mix(1.0, max(key, back), 0.6), 0.35);
+  float band = smoothstep(-width - 0.6, -width + 0.6, d) * (1.0 - smoothstep(-0.6, 0.6, d));
+  float hair = smoothstep(-uPx - 0.6, -uPx + 0.6, d) * (1.0 - smoothstep(-0.6, 0.6, d));
+  float inside = 1.0 - smoothstep(-0.6, 0.6, d);
+  vec2 pool = (p - uEntry) / (uHalf.y * vec2(1.6, 1.1));
+  float glow = streak * 0.2 * exp(-abs(d + width * 0.5) / (5.0 * uPx)) + inside * 0.08 * exp(-dot(pool, pool));
+  float light = clamp((band * streak + glow * uGlow) * uIntensity, 0.0, 1.0);
+  vec4 base = vec4(uBaseColor, 1.0) * hair * 0.6;
+  outColor = vec4(uLineColor, 1.0) * light + base * (1.0 - light);
+}`;
+
+  const UNIFORMS = [
+    "uCenter", "uHalf", "uRadius", "uPx", "uSpot", "uEntry",
+    "uLineColor", "uBaseColor", "uIntensity", "uWindow", "uThickness", "uGlow"
+  ];
+
+  const clamp = (v, min, max) => Math.min(max, Math.max(min, v));
+  const wrap = v => v - Math.floor(v);
+
+  const loopPosition = (x, y, halfX, halfY, r) => {
+    const innerX = halfX - r;
+    const innerY = halfY - r;
+    const arc = (Math.PI / 2) * r;
+    const quarter = innerX + innerY + arc;
+    const ax = Math.abs(x);
+    const ay = Math.abs(y);
+    const qx = ax - innerX;
+    const qy = ay - innerY;
+    let s;
+    if (qx > 0 && qy > 0) s = innerY + Math.atan2(qy, qx) * r;
+    else if (qx > qy) s = Math.min(ay, innerY);
+    else s = innerY + arc + innerX - Math.min(ax, innerX);
+    if (x < 0) s = y >= 0 ? 2 * quarter - s : 2 * quarter + s;
+    else if (y < 0) s = 4 * quarter - s;
+    return wrap(s / Math.max(4 * quarter, 0.0001));
+  };
+
+  const rimPoint = (position, halfX, halfY, r) => {
+    const innerX = halfX - r;
+    const innerY = halfY - r;
+    const arc = (Math.PI / 2) * r;
+    const quarter = innerX + innerY + arc;
+    let s = wrap(position) * 4 * quarter;
+    let signX = 1;
+    let signY = 1;
+    if (s > 3 * quarter) {
+      s = 4 * quarter - s;
+      signY = -1;
+    } else if (s > 2 * quarter) {
+      s -= 2 * quarter;
+      signX = -1;
+      signY = -1;
+    } else if (s > quarter) {
+      s = 2 * quarter - s;
+      signX = -1;
+    }
+    let x = innerX - (s - innerY - arc);
+    let y = halfY;
+    if (s <= innerY) {
+      x = halfX;
+      y = s;
+    } else if (s <= innerY + arc) {
+      const angle = (s - innerY) / Math.max(r, 0.0001);
+      x = innerX + Math.cos(angle) * r;
+      y = innerY + Math.sin(angle) * r;
+    }
+    return [x * signX, y * signY];
+  };
+
+  const compile = (gl, type, source) => {
+    const shader = gl.createShader(type);
+    if (!shader) return null;
+    gl.shaderSource(shader, source);
+    gl.compileShader(shader);
+    if (gl.getShaderParameter(shader, gl.COMPILE_STATUS)) return shader;
+    gl.deleteShader(shader);
+    return null;
+  };
+
+  const link = gl => {
+    const vertex = compile(gl, gl.VERTEX_SHADER, VERTEX);
+    const fragment = compile(gl, gl.FRAGMENT_SHADER, FRAGMENT);
+    const program = gl.createProgram();
+    if (!vertex || !fragment || !program) return null;
+    gl.attachShader(program, vertex);
+    gl.attachShader(program, fragment);
+    gl.bindAttribLocation(program, 0, "aPosition");
+    gl.linkProgram(program);
+    gl.deleteShader(vertex);
+    gl.deleteShader(fragment);
+    if (gl.getProgramParameter(program, gl.LINK_STATUS)) return program;
+    gl.deleteProgram(program);
+    return null;
+  };
+
+  function mount() {
+    const button = document.getElementById("login-btn");
+    const canvas = button?.querySelector(".specular-login-btn__light");
+    if (!button || !canvas) return false;
+    const gl = canvas.getContext("webgl2", {
+      alpha: true,
+      premultipliedAlpha: true,
+      antialias: false,
+      depth: false,
+      stencil: false
+    });
+    if (!gl) return false;
+    const program = link(gl);
+    if (!program) return false;
+
+    // 淡雅配色：浅青灰线条，适配当前简约浅色主题
+    const settings = {
+      radius: 20,
+      lineColor: "#6fa6a6",
+      baseColor: "#d8e4e4",
+      intensity: 1,
+      idleIntensity: 0.35,
+      shineSize: 10,
+      shineFade: 34,
+      thickness: 1.2,
+      glow: 1,
+      speed: 0.35,
+      followMouse: true,
+      proximity: 250,
+      autoAnimate: false
+    };
+
+    const uniforms = {};
+    for (const name of UNIFORMS) uniforms[name] = gl.getUniformLocation(program, name);
+    const buffer = gl.createBuffer();
+    const vao = gl.createVertexArray();
+    gl.bindVertexArray(vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    gl.bindVertexArray(null);
+
+    const probe = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
+    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    const colors = new Map();
+    const view = { width: 1, height: 1, ratio: 1 };
+    const pointer = { x: 0, y: 0, known: false };
+    const state = { spot: 0, level: 0, press: 0, ready: false };
+    let raf = 0;
+    let last = 0;
+    let visible = true;
+
+    const toRgb = value => {
+      if (colors.has(value)) return colors.get(value);
+      let rgb = [1, 1, 1];
+      if (probe) {
+        probe.clearRect(0, 0, 1, 1);
+        probe.fillStyle = "#000000";
+        probe.fillStyle = value;
+        probe.fillRect(0, 0, 1, 1);
+        const [r, g, b] = probe.getImageData(0, 0, 1, 1).data;
+        rgb = [r / 255, g / 255, b / 255];
+      }
+      colors.set(value, rgb);
+      return rgb;
+    };
+
+    const cornerRadius = () => Math.min(settings.radius, view.width / 2, view.height / 2);
+
+    const restSpot = () => {
+      const r = cornerRadius();
+      const inset = r * (1 - Math.SQRT1_2);
+      return loopPosition(inset - view.width / 2, view.height / 2 - inset, view.width / 2, view.height / 2, r);
+    };
+
+    const aim = () => {
+      if (!settings.followMouse || !pointer.known) return null;
+      const rect = button.getBoundingClientRect();
+      const scale = rect.width / view.width || 1;
+      const halfX = view.width / 2;
+      const halfY = view.height / 2;
+      const x = (pointer.x - rect.left - rect.width / 2) / scale;
+      const y = (rect.top + rect.height / 2 - pointer.y) / scale;
+      const distance = Math.hypot(Math.max(Math.abs(x) - halfX, 0), Math.max(Math.abs(y) - halfY, 0));
+      const t = clamp(1 - distance / settings.proximity, 0, 1);
+      const near = t * t * (3 - 2 * t);
+      const nearest = loopPosition(x, y, halfX, halfY, cornerRadius());
+      if (distance > 0) return { spot: nearest, near };
+      const depth = clamp(Math.min(halfX - Math.abs(x), halfY - Math.abs(y)) / (halfY * 0.8), 0, 1);
+      const sway = restSpot() - (x / halfX) * 0.06 - (y / halfY) * 0.02;
+      const offset = sway - nearest - Math.round(sway - nearest);
+      return { spot: wrap(nearest + offset * depth * depth * (3 - 2 * depth)), near };
+    };
+
+    const draw = () => {
+      const { width, height } = view;
+      const scaleX = canvas.width / (width + PAD * 2);
+      const scaleY = canvas.height / (height + PAD * 2);
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.useProgram(program);
+      gl.uniform2f(uniforms.uCenter, (PAD + width / 2) * scaleX, (PAD + height / 2) * scaleY);
+      gl.uniform2f(uniforms.uHalf, (width / 2) * scaleX, (height / 2) * scaleY);
+      gl.uniform1f(uniforms.uRadius, Math.min(settings.radius, width / 2, height / 2) * scaleX);
+      gl.uniform1f(uniforms.uPx, view.ratio);
+      const r = Math.min(settings.radius, width / 2, height / 2);
+      const [rimX, rimY] = rimPoint(state.spot, width / 2, height / 2, r);
+      const pull = 1 - Math.min(0.35 * (height / 2), Math.hypot(rimX, rimY)) / Math.max(Math.hypot(rimX, rimY), 0.0001);
+      gl.uniform1f(uniforms.uSpot, state.spot);
+      gl.uniform2f(uniforms.uEntry, rimX * pull * scaleX, rimY * pull * scaleY);
+      gl.uniform3fv(uniforms.uLineColor, toRgb(settings.lineColor));
+      gl.uniform3fv(uniforms.uBaseColor, toRgb(settings.baseColor));
+      gl.uniform1f(uniforms.uIntensity, settings.intensity * (state.level + state.press * 0.8));
+      gl.uniform2f(uniforms.uWindow, settings.shineSize / 360 + state.press * 0.06, settings.shineFade / 360 + 0.0001);
+      gl.uniform1f(uniforms.uThickness, settings.thickness);
+      gl.uniform1f(uniforms.uGlow, settings.glow);
+      gl.bindVertexArray(vao);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      gl.bindVertexArray(null);
+    };
+
+    const frame = now => {
+      raf = 0;
+      if (!visible) return;
+      const dt = last ? Math.min(0.05, (now - last) / 1000) : 1 / 60;
+      last = now;
+      const target = aim();
+      const spinning = settings.autoAnimate && !reduce;
+      const steering = !!target && target.near > 0;
+      if (!state.ready) {
+        state.spot = restSpot();
+        state.level = settings.autoAnimate ? 1 : settings.idleIntensity;
+        state.ready = true;
+      }
+      let diff = 0;
+      if (spinning && !steering) {
+        state.spot = wrap(state.spot + (settings.speed / TAU) * dt);
+      } else {
+        diff = (steering ? target.spot : restSpot()) - state.spot;
+        diff -= Math.round(diff);
+        state.spot = wrap(state.spot + diff * (1 - Math.exp(-dt * 8)));
+      }
+      const level = settings.autoAnimate ? 1 : settings.idleIntensity + (1 - settings.idleIntensity) * (target ? target.near : 0);
+      state.level += (level - state.level) * (1 - Math.exp(-dt * 7));
+      state.press *= Math.exp(-dt * 5);
+      draw();
+      const settling = Math.abs(diff) > 0.0002 || Math.abs(level - state.level) > 0.001 || state.press > 0.002;
+      if (settling || (spinning && !steering)) raf = requestAnimationFrame(frame);
+      else last = 0;
+    };
+
+    const wake = () => {
+      if (!raf && visible) raf = requestAnimationFrame(frame);
+    };
+
+    const measure = () => {
+      view.width = Math.max(1, button.offsetWidth);
+      view.height = Math.max(1, button.offsetHeight);
+      view.ratio = Math.min(window.devicePixelRatio || 1, 3);
+      canvas.width = Math.max(1, Math.round((view.width + PAD * 2) * view.ratio));
+      canvas.height = Math.max(1, Math.round((view.height + PAD * 2) * view.ratio));
+      if (state.ready) draw();
+      wake();
+    };
+
+    const onPointerMove = event => {
+      pointer.x = event.clientX;
+      pointer.y = event.clientY;
+      pointer.known = true;
+      wake();
+    };
+
+    const onPointerDown = event => {
+      pointer.x = event.clientX;
+      pointer.y = event.clientY;
+      pointer.known = true;
+      state.press = 1;
+      wake();
+    };
+
+    const onPointerEnd = event => {
+      if (event.pointerType === "mouse") return;
+      pointer.known = false;
+      wake();
+    };
+
+    const onPointerLeave = () => {
+      pointer.known = false;
+      wake();
+    };
+
+    const resizeObserver = new ResizeObserver(() => measure());
+    resizeObserver.observe(button);
+    const intersection = new IntersectionObserver(entries => {
+      visible = entries.some(entry => entry.isIntersecting);
+      if (visible) {
+        last = 0;
+        wake();
+      }
+    });
+    intersection.observe(button);
+    window.addEventListener("pointermove", onPointerMove, { passive: true });
+    window.addEventListener("pointerup", onPointerEnd, { passive: true });
+    window.addEventListener("pointercancel", onPointerEnd, { passive: true });
+    document.documentElement.addEventListener("pointerleave", onPointerLeave);
+    button.addEventListener("pointerdown", onPointerDown);
+    measure();
+
+    // 登录状态切换后按钮可能隐藏/显示，用观察器在重新可见时重测
+    const stateObserver = new MutationObserver(() => {
+      if (!button.hidden) {
+        last = 0;
+        measure();
+      }
+    });
+    stateObserver.observe(button, { attributes: true, attributeFilter: ["hidden"] });
+
+    return true;
+  }
+
+  // DOM 就绪后挂载（bootstrap 里也会调用 refreshUser，故在此直接初始化）
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", () => mount());
+  } else {
+    mount();
+  }
+})();
 
 document.addEventListener("DOMContentLoaded", bootstrap);
