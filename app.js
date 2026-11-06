@@ -35,6 +35,7 @@ const VIEW_NAMES = {
   templates: "公文模板",
   scores: "加减分",
   guide: "使用指南",
+  profile: "我的",
 };
 
 function switchView(view) {
@@ -63,6 +64,10 @@ function switchView(view) {
     loadMemberOptions();
     loadMemberList();
     loadAdminList();
+  }
+  // 切到我的页时刷新资料
+  if (view === "profile") {
+    renderProfile();
   }
 }
 
@@ -100,10 +105,10 @@ const topAvatar = document.getElementById("top-avatar");
 loginBtn.addEventListener("click", () => openAuthDialog());
 document.getElementById("auth-close").addEventListener("click", () => authDialog.close());
 
-// 点击侧栏用户区 / 顶部头像 → 打开个人账号页
+// 点击侧栏用户区 / 顶部头像 → 切换到「我的」页面
 const workspaceUser = document.querySelector(".workspace-user");
-if (workspaceUser) workspaceUser.addEventListener("click", () => openProfileDialog());
-topAvatar.addEventListener("click", () => openProfileDialog());
+if (workspaceUser) workspaceUser.addEventListener("click", () => switchView("profile"));
+topAvatar.addEventListener("click", () => switchView("profile"));
 
 function openAuthDialog() {
   authDialog.showModal();
@@ -325,23 +330,23 @@ async function claimAdminIfNeeded() {
 }
 
 // ===== 个人账号 =====
-const profileDialog = document.getElementById("profile-dialog");
 let pendingAvatarFile = null; // 待上传的头像文件
 
-// 打开个人账号弹窗
-function openProfileDialog() {
-  if (!cloud) { alert("服务未连接，请刷新重试"); return; }
+// 渲染「我的」页面
+function renderProfile() {
+  const loginCard = document.getElementById("profile-login-card");
+  const panel = document.getElementById("profile-panel");
+
   if (!currentUserInfo) {
-    // 未登录，引导登录
-    openAuthDialog();
+    // 未登录：显示引导卡片
+    loginCard.hidden = false;
+    panel.hidden = true;
     return;
   }
-  renderProfile();
-  profileDialog.showModal();
-}
 
-// 渲染个人账号信息
-function renderProfile() {
+  loginCard.hidden = true;
+  panel.hidden = false;
+
   const info = currentUserInfo;
   const name = info.customName || info.name || info.phone || info.email || "已登录";
   const avatarUrl = info.customAvatarUrl || info.avatarUrl || "";
@@ -376,6 +381,9 @@ function maskEmail(e) {
   const head = local.slice(0, 2) + "***";
   return head + "@" + domain;
 }
+
+// 未登录时的登录按钮
+document.getElementById("profile-guest-login").addEventListener("click", () => openAuthDialog());
 
 // 保存昵称
 document.getElementById("profile-save").addEventListener("click", async () => {
@@ -412,8 +420,8 @@ document.getElementById("profile-save").addEventListener("click", async () => {
       }
     }
     errEl.textContent = "";
-    profileDialog.close();
     await refreshUser();
+    renderProfile();
   } catch (e) {
     errEl.textContent = "保存失败：" + (e.message || "请稍后重试");
   }
@@ -466,15 +474,13 @@ document.getElementById("profile-logout").addEventListener("click", async () => 
   if (!confirm("确定要退出登录吗？")) return;
   try {
     await cloud.auth.signOut();
-    profileDialog.close();
     currentUserInfo = null;
     await refreshUser();
+    renderProfile();
   } catch (e) {
     alert("退出失败：" + (e.message || "请重试"));
   }
 });
-
-document.getElementById("profile-close").addEventListener("click", () => profileDialog.close());
 
 // ===== 启动 =====
 async function bootstrap() {
