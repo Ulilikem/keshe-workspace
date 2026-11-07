@@ -711,7 +711,14 @@ function openTemplateDialog(group) {
   templateDialog.showModal();
 }
 
-document.getElementById("btn-add-template").addEventListener("click", () => openTemplateDialog(null));
+document.getElementById("btn-add-template").addEventListener("click", async () => {
+  if (cloud) await checkScorePermission();
+  if (!isAdminUser) {
+    showPermissionToast("你没有权限新建主题，请先向负责人申请。");
+    return;
+  }
+  openTemplateDialog(null);
+});
 document.getElementById("template-close").addEventListener("click", () => templateDialog.close());
 
 document.getElementById("template-save").addEventListener("click", async () => {
@@ -739,7 +746,12 @@ document.getElementById("template-save").addEventListener("click", async () => {
     });
     if (error) { showTemplateError("保存失败：" + (error.message || "")); return; }
   } else {
-    // 新建主题 + 第一份范文
+    // 新建主题 + 第一份范文：仅已获负责人权限的账号可操作
+    if (cloud) await checkScorePermission();
+    if (!isAdminUser) {
+      showTemplateError("你没有权限新建主题，请先向负责人申请。");
+      return;
+    }
     const name = document.getElementById("template-name").value.trim();
     const category = document.getElementById("template-category").value;
     if (!name) { showTemplateError("请填写主题名称"); return; }
