@@ -304,8 +304,11 @@
                 <button class="button secondary" id="btn-export-excel">
                   <i data-icon="download"></i>导出 Excel
                 </button>
-                <button class="button danger" id="btn-clear-records" hidden>
+                <button class="button danger" id="btn-clear-members" type="button">
                   <i data-icon="trash"></i>清空记录
+                </button>
+                <button class="button danger" id="btn-clear-records" hidden>
+                  <i data-icon="trash"></i>清空全部记录
                 </button>
               </div>
             </div>
@@ -360,14 +363,9 @@
           <div id="subtab-member-mgmt" class="subview" hidden>
             <div class="toolbar">
               <div class="toolbar-title">成员名单</div>
-              <div class="toolbar-actions">
-                <button class="button danger" id="btn-clear-members" type="button">
-                  <i data-icon="trash"></i>清空记录
-                </button>
-                <button class="button primary" id="btn-add-member" type="button">
-                  <i data-icon="plus"></i>添加成员
-                </button>
-              </div>
+              <button class="button primary" id="btn-add-member" type="button">
+                <i data-icon="plus"></i>添加成员
+              </button>
             </div>
             <div class="member-list" id="member-list"></div>
 
@@ -669,6 +667,6 @@
     <script src="vendor/workbuddy-cloud-sdk.js?v=20261106t"></script>
     <!-- SheetJS（导出 Excel 用） -->
     <script src="https://unpkg.com/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-    <script src="app.js?v=20261106t"></script>
+    <script src="app.js?v=20261106u"></script>
   </body>
 </html>
