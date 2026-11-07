@@ -656,6 +656,37 @@ const CATEGORY_LABELS = {
   post: "推文宣传类",
   format: "格式要求",
 };
+const PENDING_CATEGORY_PREFIX = "pending:";
+const PENDING_SAMPLE_TITLE = "pending";
+const SCORE_NEW_GROUP = 5;
+const SCORE_NEW_SAMPLE = 3;
+let templateApplyMode = null; // "group" 申请新建大类；"sample" 申请添加范文
+
+function isPendingGroup(category) {
+  return String(category || "").startsWith(PENDING_CATEGORY_PREFIX);
+}
+
+function realCategory(category) {
+  return isPendingGroup(category) ? String(category).slice(PENDING_CATEGORY_PREFIX.length) : category;
+}
+
+async function getBoundMemberName() {
+  const uid = currentUserInfo?.uid;
+  if (!uid || !cloud?.database) return "";
+  const { data } = await cloud.database.from("member_meta").select("name, status").eq("uid", uid).maybeSingle();
+  if (!data || data.status === "disabled") return "";
+  return data.name || "";
+}
+
+async function addTemplateScore(member, delta, reason) {
+  const { error } = await cloud.database.from("scores").insert({
+    member,
+    delta,
+    reason,
+    owner_name: currentUserInfo?.name || currentUserPhone || "负责人",
+  });
+  return error;
+}
 
 // 子标签切换
 document.querySelectorAll(".sub-tab").forEach((tab) => {
@@ -674,8 +705,9 @@ document.querySelectorAll(".sub-tab").forEach((tab) => {
 const templateDialog = document.getElementById("template-dialog");
 let editingGroupId = null; // 非 null = 添加范文模式；null = 新建主题模式
 
-function openTemplateDialog(group) {
+function openTemplateDialog(group, mode) {
   editingGroupId = group ? group.id : null;
+  templateApplyMode = mode || null;
   const titleEl = document.getElementById("template-dialog-title");
   const nameField = document.getElementById("template-name");
   const categoryField = document.getElementById("template-category");
@@ -684,22 +716,30 @@ function openTemplateDialog(group) {
   const groupFields = document.getElementById("template-group-fields");
   const groupHint = document.getElementById("template-group-hint");
   const groupHintBox = document.getElementById("template-group-hint-box");
+  const hint = document.getElementById("template-apply-hint");
+  const saveBtn = document.getElementById("template-save");
 
   document.getElementById("template-error").textContent = "";
+  hint.hidden = true;
+  hint.textContent = "";
+  saveBtn.textContent = "保存";
 
   if (group) {
-    // 添加范文模式
-    titleEl.textContent = "添加范文";
+    titleEl.textContent = mode === "apply-sample" ? "申请添加范文" : "添加范文";
     nameField.value = "";
     categoryField.value = "notice";
     contentEl.value = "";
     contentLabel.textContent = "范文内容";
     groupFields.hidden = true;
     groupHint.hidden = false;
-    groupHintBox.textContent = `${group.title}（${CATEGORY_LABELS[group.category] || "其他"}）`;
+    groupHintBox.textContent = `${group.title}（${CATEGORY_LABELS[realCategory(group.category)] || "其他"}）`;
+    if (mode === "apply-sample") {
+      hint.hidden = false;
+      hint.textContent = "提交后由负责人审核。通过后，这份范文会加入该大类，并为你自动加 3 分。";
+      saveBtn.textContent = "提交申请";
+    }
   } else {
-    // 新建主题模式
-    titleEl.textContent = "新建主题";
+    titleEl.textContent = mode === "apply-group" ? "申请新建大类" : "新建主题";
     nameField.value = "";
     categoryField.value = "notice";
     contentEl.value = "";
@@ -707,17 +747,32 @@ function openTemplateDialog(group) {
     groupFields.hidden = false;
     groupHint.hidden = true;
     groupHintBox.textContent = "";
+    if (mode === "apply-group") {
+      hint.hidden = false;
+      hint.textContent = "提交后由负责人审核。通过后，这个大类会加入模板库，并为你自动加 5 分。";
+      saveBtn.textContent = "提交申请";
+    }
   }
   templateDialog.showModal();
 }
 
 document.getElementById("btn-add-template").addEventListener("click", async () => {
   if (cloud) await checkScorePermission();
-  if (!isAdminUser) {
-    showPermissionToast("你没有权限新建主题，请先向负责人申请。");
+  if (isAdminUser) {
+    openTemplateDialog(null);
     return;
   }
-  openTemplateDialog(null);
+  const session = cloud ? await cloud.auth.getSession() : { data: null };
+  if (!session?.data) {
+    showPermissionToast("请先登录，再向负责人申请新建大类。");
+    return;
+  }
+  const memberName = await getBoundMemberName();
+  if (!memberName) {
+    showPermissionToast("请先在「我的」绑定成员身份，再申请新建大类。");
+    return;
+  }
+  openTemplateDialog(null, "apply-group");
 });
 document.getElementById("template-close").addEventListener("click", () => templateDialog.close());
 
@@ -733,54 +788,156 @@ document.getElementById("template-save").addEventListener("click", async () => {
   if (!content) { showTemplateError("请填写范文内容"); return; }
 
   const ownerName = session.data.user?.name ?? null;
+  const applying = templateApplyMode === "apply-group" || templateApplyMode === "apply-sample";
+  let applicant = ownerName;
+  if (applying) {
+    applicant = await getBoundMemberName();
+    if (!applicant) { showTemplateError("请先在「我的」绑定成员身份后再申请。"); return; }
+  }
 
   if (editingGroupId) {
-    // 添加范文到已有主题
     const { error } = await cloud.database.from("templates").insert({
       group_id: editingGroupId,
       content,
-      owner_name: ownerName,
-      // title/category 冗余存储便于兼容，但以 group 为准
-      title: "",
+      owner_name: applying ? applicant : ownerName,
+      title: templateApplyMode === "apply-sample" ? PENDING_SAMPLE_TITLE : "",
       category: "",
     });
     if (error) { showTemplateError("保存失败：" + (error.message || "")); return; }
+    if (templateApplyMode === "apply-sample") {
+      showPermissionToast("申请已提交，负责人通过后自动加 3 分。");
+    }
   } else {
-    // 新建主题 + 第一份范文：仅已获负责人权限的账号可操作
-    if (cloud) await checkScorePermission();
-    if (!isAdminUser) {
-      showTemplateError("你没有权限新建主题，请先向负责人申请。");
-      return;
+    if (templateApplyMode !== "apply-group") {
+      if (cloud) await checkScorePermission();
+      if (!isAdminUser) {
+        showTemplateError("你没有权限新建主题，请先向负责人申请。");
+        return;
+      }
     }
     const name = document.getElementById("template-name").value.trim();
     const category = document.getElementById("template-category").value;
     if (!name) { showTemplateError("请填写主题名称"); return; }
+    const storedCategory = templateApplyMode === "apply-group" ? PENDING_CATEGORY_PREFIX + category : category;
 
-    // 1. 建主题
     const { data: groupData, error: groupErr } = await cloud.database
       .from("template_groups")
-      .insert({ title: name, category, owner_name: ownerName })
+      .insert({ title: name, category: storedCategory, owner_name: applying ? applicant : ownerName })
       .select();
     if (groupErr) { showTemplateError("创建主题失败：" + (groupErr.message || "")); return; }
     const groupId = groupData?.[0]?.id;
     if (!groupId) { showTemplateError("创建主题失败：未返回主题ID"); return; }
 
-    // 2. 插入第一份范文
     const { error } = await cloud.database.from("templates").insert({
       group_id: groupId,
       content,
-      owner_name: ownerName,
+      owner_name: applying ? applicant : ownerName,
       title: "",
       category: "",
     });
     if (error) { showTemplateError("保存范文失败：" + (error.message || "")); return; }
+    if (templateApplyMode === "apply-group") {
+      showPermissionToast("申请已提交，负责人通过后自动加 5 分。");
+    }
   }
+  templateApplyMode = null;
   templateDialog.close();
   await loadTemplates();
 });
 
 function showTemplateError(msg) {
   document.getElementById("template-error").textContent = msg || "";
+}
+
+function renderTemplateReview(reviewEl, pendingGroups, pendingSamples, byGroup, liveGroups, myName) {
+  if (!reviewEl) return;
+  const visibleGroups = pendingGroups.filter((g) => isAdminUser || (myName && g.owner_name === myName));
+  const visibleSamples = pendingSamples.filter((t) => isAdminUser || (myName && t.owner_name === myName));
+  if (visibleGroups.length === 0 && visibleSamples.length === 0) {
+    reviewEl.hidden = true;
+    reviewEl.innerHTML = "";
+    return;
+  }
+  reviewEl.hidden = false;
+  const groupHtml = visibleGroups.map((g) => {
+    const cat = CATEGORY_LABELS[realCategory(g.category)] || "其他";
+    const sample = (byGroup[g.id] || [])[0];
+    const actions = isAdminUser
+      ? `<div class="template-review-actions">
+          <button class="template-review-pass" type="button" data-review="approve-group" data-id="${g.id}" data-member="${escapeHtml(g.owner_name || "")}" data-title="${escapeHtml(g.title || "")}" data-category="${escapeHtml(realCategory(g.category))}">通过并加 ${SCORE_NEW_GROUP} 分</button>
+          <button class="template-review-reject" type="button" data-review="reject-group" data-id="${g.id}" data-title="${escapeHtml(g.title || "")}">驳回</button>
+        </div>`
+      : `<span class="template-review-wait">审核中</span>`;
+    return `<div class="card template-review-card">
+      <span class="template-cat">新建大类 · ${cat} · 通过后 +${SCORE_NEW_GROUP}</span>
+      <h3>${escapeHtml(g.title)}</h3>
+      <p class="template-review-meta">申请人：${escapeHtml(g.owner_name || "未知")}</p>
+      <pre>${escapeHtml(sample?.content || "")}</pre>
+      ${actions}
+    </div>`;
+  }).join("");
+  const sampleHtml = visibleSamples.map((t) => {
+    const g = liveGroups.find((x) => String(x.id) === String(t.group_id));
+    const actions = isAdminUser
+      ? `<div class="template-review-actions">
+          <button class="template-review-pass" type="button" data-review="approve-sample" data-id="${t.id}" data-member="${escapeHtml(t.owner_name || "")}" data-title="${escapeHtml(g?.title || "")}">通过并加 ${SCORE_NEW_SAMPLE} 分</button>
+          <button class="template-review-reject" type="button" data-review="reject-sample" data-id="${t.id}">驳回</button>
+        </div>`
+      : `<span class="template-review-wait">审核中</span>`;
+    return `<div class="card template-review-card">
+      <span class="template-cat">已有大类范文 · 通过后 +${SCORE_NEW_SAMPLE}</span>
+      <h3>${escapeHtml(g?.title || "大类")}</h3>
+      <p class="template-review-meta">申请人：${escapeHtml(t.owner_name || "未知")}</p>
+      <pre>${escapeHtml(t.content || "")}</pre>
+      ${actions}
+    </div>`;
+  }).join("");
+  reviewEl.innerHTML = groupHtml + sampleHtml;
+  reviewEl.querySelectorAll("[data-review]").forEach((btn) => {
+    btn.addEventListener("click", () => handleTemplateReview(btn));
+  });
+}
+
+async function handleTemplateReview(btn) {
+  if (!isAdminUser) return;
+  const act = btn.dataset.review;
+  const id = btn.dataset.id;
+  const member = btn.dataset.member || "";
+  const title = btn.dataset.title || "";
+  if (act === "approve-group") {
+    if (!confirm(`通过大类「${title}」吗？\n\n通过后加入模板库，并为「${member}」加 ${SCORE_NEW_GROUP} 分。`)) return;
+    const { error } = await cloud.database.from("template_groups").update({ category: btn.dataset.category }).eq("id", id);
+    if (error) { alert("通过失败：" + (error.message || "")); return; }
+    if (!member) {
+      alert("大类已通过，但申请人没有绑定成员身份，未能加分。");
+    } else {
+      const scoreError = await addTemplateScore(member, SCORE_NEW_GROUP, `新建公文大类「${title}」审核通过`);
+      if (scoreError) alert("大类已通过，但加分失败：" + (scoreError.message || ""));
+      else showPermissionToast(`已通过，已为「${member}」加 ${SCORE_NEW_GROUP} 分。`);
+    }
+  } else if (act === "reject-group") {
+    if (!confirm(`驳回大类「${title}」吗？\n\n驳回后申请会被删除，不加分。`)) return;
+    await cloud.database.from("templates").delete().eq("group_id", id);
+    const { error } = await cloud.database.from("template_groups").delete().eq("id", id);
+    if (error) { alert("驳回失败：" + (error.message || "")); return; }
+  } else if (act === "approve-sample") {
+    if (!confirm(`通过这份范文吗？\n\n通过后加入「${title}」，并为「${member}」加 ${SCORE_NEW_SAMPLE} 分。`)) return;
+    const { error } = await cloud.database.from("templates").update({ title: "" }).eq("id", id);
+    if (error) { alert("通过失败：" + (error.message || "")); return; }
+    if (!member) {
+      alert("范文已通过，但申请人没有绑定成员身份，未能加分。");
+    } else {
+      const scoreError = await addTemplateScore(member, SCORE_NEW_SAMPLE, `提交「${title}」范文审核通过`);
+      if (scoreError) alert("范文已通过，但加分失败：" + (scoreError.message || ""));
+      else showPermissionToast(`已通过，已为「${member}」加 ${SCORE_NEW_SAMPLE} 分。`);
+    }
+  } else if (act === "reject-sample") {
+    if (!confirm("驳回这份范文吗？\n\n驳回后申请会被删除，不加分。")) return;
+    const { error } = await cloud.database.from("templates").delete().eq("id", id);
+    if (error) { alert("驳回失败：" + (error.message || "")); return; }
+  }
+  await loadTemplates();
+  await loadScores();
 }
 
 // 加载主题列表（含各主题的范文）
@@ -794,16 +951,21 @@ async function loadTemplates() {
     .select("*")
     .order("created_at", { ascending: false });
 
-  if (error || !groups || groups.length === 0) {
+  await checkScorePermission();
+  const myName = await getBoundMemberName();
+  const reviewEl = document.getElementById("template-review");
+
+  if (error) {
     listEl.innerHTML = "";
     emptyEl.hidden = false;
+    if (reviewEl) reviewEl.hidden = true;
     return;
   }
 
-  // 拉取所有范文，按 group 分组
+  const allGroups = groups || [];
   const { data: tpls, error: tplErr } = await cloud.database
     .from("templates")
-    .select("id, group_id, content, created_at")
+    .select("id, group_id, content, title, owner_name, created_at")
     .order("created_at", { ascending: true });
 
   const byGroup = {};
@@ -814,12 +976,24 @@ async function loadTemplates() {
     });
   }
 
+  const pendingGroups = allGroups.filter((g) => isPendingGroup(g.category));
+  const liveGroups = allGroups.filter((g) => !isPendingGroup(g.category));
+  const pendingSamples = (tpls || []).filter((t) => t.title === PENDING_SAMPLE_TITLE && liveGroups.some((g) => String(g.id) === String(t.group_id)));
+
+  renderTemplateReview(reviewEl, pendingGroups, pendingSamples, byGroup, liveGroups, myName);
+
+  if (liveGroups.length === 0) {
+    listEl.innerHTML = "";
+    emptyEl.hidden = false;
+    return;
+  }
+
   emptyEl.hidden = true;
-  listEl.innerHTML = groups
+  listEl.innerHTML = liveGroups
     .map((g) => {
       const cat = CATEGORY_LABELS[g.category] || g.category || "其他";
       const catClass = g.category === "post" ? "post" : g.category === "format" ? "format" : "";
-      const items = byGroup[g.id] || [];
+      const items = (byGroup[g.id] || []).filter((t) => t.title !== PENDING_SAMPLE_TITLE);
       const count = items.length;
       const itemsHtml = items
         .map((t, i) => `
@@ -849,11 +1023,27 @@ async function loadTemplates() {
     })
     .join("");
 
-  // 添加范文
+  // 添加范文：负责人直接加入，普通成员提交申请
   listEl.querySelectorAll(".template-add-item").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const g = groups.find((x) => String(x.id) === String(btn.dataset.id));
-      openTemplateDialog(g);
+    btn.addEventListener("click", async () => {
+      const g = liveGroups.find((x) => String(x.id) === String(btn.dataset.id));
+      if (!g) return;
+      if (cloud) await checkScorePermission();
+      if (isAdminUser) {
+        openTemplateDialog(g);
+        return;
+      }
+      const session = cloud ? await cloud.auth.getSession() : { data: null };
+      if (!session?.data) {
+        showPermissionToast("请先登录，再申请添加范文。");
+        return;
+      }
+      const memberName = await getBoundMemberName();
+      if (!memberName) {
+        showPermissionToast("请先在「我的」绑定成员身份，再申请添加范文。");
+        return;
+      }
+      openTemplateDialog(g, "apply-sample");
     });
   });
 
@@ -1033,12 +1223,12 @@ document.getElementById("btn-generate").addEventListener("click", async () => {
       .maybeSingle();
     const { data: tpls } = await cloud.database
       .from("templates")
-      .select("content")
+      .select("content, title")
       .eq("group_id", groupId)
       .order("created_at", { ascending: true });
 
     const title = groupData?.title || "参考主题";
-    const contents = (tpls || []).map((t) => t.content).filter(Boolean);
+    const contents = (tpls || []).filter((t) => t.title !== PENDING_SAMPLE_TITLE).map((t) => t.content).filter(Boolean);
     if (contents.length > 0) {
       templateContent = `主题「${title}」下共有 ${contents.length} 份范文，请综合参考它们的格式与措辞风格：\n\n` +
         contents.map((c, i) => `【范文 ${i + 1}】\n${c}`).join("\n\n");

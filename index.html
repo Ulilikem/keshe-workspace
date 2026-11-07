@@ -198,6 +198,8 @@
                 <i data-icon="plus"></i>新建主题
               </button>
             </div>
+            <p class="template-rule">普通成员可以申请新建大类（如「茶话会通知」），负责人通过后自动加 5 分；向已有大类提交范文，通过后自动加 3 分。</p>
+            <div id="template-review" class="template-review" hidden></div>
 
             <div class="template-list" id="template-list">
               <!-- 动态渲染 -->
@@ -590,6 +592,7 @@
             <label class="field-label" id="template-content-label">范文内容</label>
             <textarea id="template-content" rows="10" placeholder="粘贴一份范文或格式要求，例如：&#10;&#10;标题：【通知】+ 事由，居中&#10;称谓：各位同事：&#10;落款：部门名称 + 日期，右对齐&#10;&#10;同一个主题下可以添加多份范文，AI 生成时会综合参考它们。"></textarea>
 
+            <p class="template-apply-hint" id="template-apply-hint" hidden></p>
             <div class="auth-error" id="template-error"></div>
             <button class="button primary auth-submit" id="template-save" type="button">保存</button>
           </div>
@@ -664,6 +667,6 @@
     <script src="vendor/workbuddy-cloud-sdk.js?v=20261106t"></script>
     <!-- SheetJS（导出 Excel 用） -->
     <script src="https://unpkg.com/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-    <script src="app.js?v=20261107a"></script>
+    <script src="app.js?v=20261107b"></script>
   </body>
 </html>

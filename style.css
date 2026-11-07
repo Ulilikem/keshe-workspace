@@ -843,6 +843,78 @@ main {
   margin: 0;
   word-break: break-word;
 }
+.template-rule {
+  margin: -6px 0 16px;
+  color: #5c656c;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.template-apply-hint {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #3d6ea8;
+  background: #eef5ff;
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+.template-review {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+.template-review-card {
+  padding: 14px 16px;
+}
+.template-review-card h3 {
+  margin: 8px 0 4px;
+  font-size: 15px;
+  color: #25282c;
+}
+.template-review-meta {
+  margin: 0 0 8px;
+  color: #8c9198;
+  font-size: 12px;
+}
+.template-review-card pre {
+  margin: 0 0 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.55;
+  color: #3f454a;
+  max-height: 120px;
+  overflow: auto;
+}
+.template-review-actions {
+  display: flex;
+  gap: 8px;
+}
+.template-review-pass,
+.template-review-reject,
+.template-review-wait {
+  border: 0;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 8px;
+  padding: 6px 12px;
+}
+.template-review-pass {
+  color: #fff;
+  background: #0068df;
+  cursor: pointer;
+}
+.template-review-reject {
+  color: #8a3a46;
+  background: #fdecee;
+  cursor: pointer;
+}
+.template-review-wait {
+  color: #99733c;
+  background: #faf5e9;
+}
 .template-cat {
   font-size: 10px;
   color: #527da9;
