@@ -1148,14 +1148,6 @@ main {
   background: #ffffffcc;
   border: 1px solid #e6eaed;
 }
-.member-check {
-  width: 18px;
-  height: 18px;
-  margin: 0;
-  flex-shrink: 0;
-  accent-color: #0068df;
-  cursor: pointer;
-}
 .member-item.disabled { opacity: 0.55; }
 .member-item-name { font-weight: 600; color: #25282c; font-size: 14px; }
 .member-item-role { color: #9aa2aa; font-size: 12px; }
